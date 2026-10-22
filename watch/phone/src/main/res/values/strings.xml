@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pulse Phone</string>
+    <string name="duration_label">Duration: %1$d s</string>
+    <string name="server_label">Server</string>
+    <string name="try_60">Try 60 fps (falls back to 30)</string>
+    <string name="manual_exposure">Manual exposure and ISO (MANUAL_SENSOR only)</string>
+    <string name="start">Start</string>
+    <string name="stop_and_send">Stop and send</string>
+    <string name="cancel">Cancel</string>
+    <string name="sending">Sending…</string>
+    <string name="no_hr">-- bpm</string>
+    <string name="upload_failed">%1$s\nThe trace is saved on the phone (%2$s); tap Retry upload once the server is reachable.</string>
+    <string name="manual_fields">Exposure (µs) and ISO, used when manual is ticked</string>
+    <string name="retry">Retry upload (%1$d pending)</string>
+</resources>

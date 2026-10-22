@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Pulse Exploration</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="index" data-https-port="8766">
+  <header class="top">
+    <strong>Pulse exploration</strong>
+    <span class="badge plain">prototype</span>
+  </header>
+  <main>
+    <h1>Measure your pulse with the phone</h1>
+    <p class="lede">A research prototype running on the laptop on your local network
+      (<span data-origin>this server</span>). It estimates heart rate from the camera. It is not a medical device.</p>
+
+    <div class="tiers">
+      <section class="card">
+        <div class="tier-head"><h2>Video upload</h2><span class="badge">tier: video</span></div>
+        <p><b>Nothing to install, no certificate.</b> Record 30–60 s with the phone's own camera app
+          (fingertip on the rear camera with the flash on, or your face on the front camera), then upload the file.</p>
+        <ul>
+          <li>Easiest option. Works over plain HTTP.</li>
+          <li>The camera app adjusts exposure and compresses the video, which adds noise.
+            Fingertip video is much more reliable than face video.</li>
+          <li>The whole video file is sent to the laptop.</li>
+        </ul>
+        <a class="btn primary" href="/upload">Open the upload page</a>
+      </section>
+
+      <section class="card">
+        <div class="tier-head"><h2>Live capture</h2><span class="badge">tier: capture</span></div>
+        <p><b>The page drives the camera itself:</b> it turns on the torch and locks exposure and white balance
+          where the phone allows it, then measures the colour of every frame for 45 s.</p>
+        <ul>
+          <li>Closest to the setups used in published fingertip studies (about 2–4.5 bpm error).</li>
+          <li>The video never leaves the phone. Only one average colour per frame is sent.</li>
+          <li>Needs HTTPS: Chrome shows a certificate warning once. That is expected here, because the laptop
+            made its own certificate. Tap <i>Advanced</i>, then <i>Proceed</i>.</li>
+        </ul>
+        <a class="btn primary" href="/capture" data-https-path="/capture">Open the capture page (HTTPS)</a>
+        <p class="muted">Address: <a href="/capture" data-https-path="/capture" data-show-url>/capture</a></p>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>What to expect</h2>
+      <ul>
+        <li><b>Fingertip</b> (rear camera and flash): heart rate is usually within a few bpm. Heart-rate variability
+          is rough at 30 frames per second.</li>
+        <li><b>Face</b> (front camera): heart rate only, and only when you sit still in even light. Errors of
+          10 bpm or more are common on compressed phone video. HRV from face video is not usable.</li>
+        <li>Every result shows its <span class="badge">tier</span> so recordings from different setups are never mixed up.</li>
+      </ul>
+    </section>
+  </main>
+  <script src="/static/common.js"></script>
+</body>
+</html>

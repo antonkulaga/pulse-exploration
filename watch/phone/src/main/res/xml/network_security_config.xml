@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The laptop server is plain HTTP on the LAN, and its address is user-editable (an IP, which
+     domain-config cannot match by range), so cleartext is allowed for every host. Prototype only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

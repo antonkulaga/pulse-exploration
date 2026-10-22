@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Android / Gradle
+.gradle/
+.kotlin/
+watch/local.properties
+watch/**/build/
+# Samsung Health Sensor SDK is licensed separately; never commit it
+watch/probe/libs/*.aar
+
+# Recordings are personal health data
+data/

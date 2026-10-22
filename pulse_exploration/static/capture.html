@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Pulse Live Capture</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="capture" data-endpoint="/camera/trace" data-https-port="8766" data-duration-s="45">
+  <div id="synthetic-banner" class="synthetic-banner" hidden>Synthetic test signal: not a measurement</div>
+  <header class="top">
+    <a href="/">&larr; Pulse</a>
+    <span class="badge">tier: capture</span>
+  </header>
+  <main>
+    <h1>Live camera measurement</h1>
+    <p class="lede">This page drives the camera itself: torch on, exposure locked where the phone allows it.
+      Only one average colour per frame is sent to the laptop. The video never leaves the phone.</p>
+
+    <section id="insecure" class="card warn" hidden>
+      <h2>This page needs HTTPS</h2>
+      <p>Chrome only gives web pages the camera over a secure connection. Open the HTTPS address instead:</p>
+      <p><a class="btn primary" href="/capture" data-https-path="/capture">Open the HTTPS capture page</a></p>
+      <p class="muted"><a href="/capture" data-https-path="/capture" data-show-url>/capture</a></p>
+    </section>
+
+    <details class="card" id="cert-help">
+      <summary>About the certificate warning</summary>
+      <p>When you open the HTTPS address, Chrome shows <i>Your connection is not private</i>. <b>That is expected for this
+        local prototype</b>: the laptop made its own certificate instead of buying one, so Chrome cannot vouch for it.
+        The connection is still encrypted, and it stays on your Wi-Fi.</p>
+      <ol>
+        <li>Tap <b>Advanced</b>.</li>
+        <li>Tap <b>Proceed to the laptop's address (unsafe)</b>.</li>
+        <li>Allow camera access when Chrome asks. Chrome may ask again on later visits.</li>
+      </ol>
+      <p class="muted">Only do this for the laptop's own address on your home network.</p>
+    </details>
+
+    <section class="card">
+      <h2>1. Choose what to measure</h2>
+      <div class="seg" role="radiogroup" aria-label="Measurement mode">
+        <label><input type="radio" name="mode" value="finger" checked>Fingertip<br><small>rear camera + torch</small></label>
+        <label><input type="radio" name="mode" value="face">Face<br><small>front camera</small></label>
+      </div>
+      <div class="howto" data-for="finger">
+        <ol>
+          <li>Start the camera. The torch should come on.</li>
+          <li>Rest the pad of one fingertip <b>lightly</b> over the main rear lens and the torch, so the preview turns evenly red.
+            Do not press hard.</li>
+          <li>Rest your hand and the phone on a table, then start the measurement and keep still.</li>
+        </ol>
+      </div>
+      <div class="howto" data-for="face" hidden>
+        <ol>
+          <li>Prop the phone up at arm's length, with even light on your face from the front.</li>
+          <li>Start the camera and move until your forehead sits inside the small box. Keep hair off your forehead.</li>
+          <li>Start the measurement. Sit still, breathe normally and do not talk.</li>
+        </ol>
+      </div>
+      <div class="field-row">
+        <label for="fps">Frame rate</label>
+        <select id="fps">
+          <option value="30" selected>30 fps (recommended)</option>
+          <option value="60">Try 60 fps</option>
+        </select>
+        <label for="duration">Duration</label>
+        <select id="duration">
+          <option value="45" selected>45 s (heart rate)</option>
+          <option value="60">60 s (adds HRV, fingertip only)</option>
+          <option value="120">120 s (adds HRV frequency bands)</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. Camera</h2>
+      <button id="start-cam" class="btn primary" type="button">Start camera</button>
+      <div class="field-row" id="camera-row" hidden>
+        <label for="camera">Camera</label>
+        <select id="camera"></select>
+      </div>
+      <div class="stage" id="stage" data-mode="finger" hidden>
+        <video id="video" playsinline muted autoplay></video>
+        <div class="guide face oval"></div>
+        <div class="guide face roi" id="face-roi"></div>
+        <div class="guide finger roi" id="finger-roi"></div>
+      </div>
+      <div class="live-stats" id="live-stats" hidden>
+        <span>fps <b id="live-fps">–</b></span>
+        <span>R <b id="live-r">–</b></span>
+        <span>G <b id="live-g">–</b></span>
+        <span>B <b id="live-b">–</b></span>
+        <span>missed <b id="live-missed">0</b></span>
+      </div>
+      <div id="coverage" class="notice" hidden></div>
+      <canvas id="live-plot" class="waveform" hidden aria-label="live signal"></canvas>
+      <details id="controls-box" hidden>
+        <summary>Camera controls: what actually applied</summary>
+        <table class="kv" id="controls"><tbody></tbody></table>
+        <p class="muted">Locking happens when the measurement starts, so the camera has adjusted to your finger or face first.</p>
+      </details>
+      <div id="cam-status" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="card">
+      <h2>3. Measure (<span id="duration-label">45</span> s)</h2>
+      <button id="start-rec" class="btn primary" type="button" disabled>Start measurement</button>
+      <div id="recording" hidden>
+        <div class="countdown" id="countdown">45</div>
+        <progress id="rec-bar" max="100" value="0"></progress>
+        <div class="btn-row">
+          <button id="cancel-rec" class="btn" type="button">Cancel</button>
+          <button id="finish-early" class="btn" type="button" disabled>Analyse now</button>
+        </div>
+      </div>
+      <button id="retry" class="btn" type="button" hidden>Send again</button>
+      <div id="rec-status" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="result" class="card" hidden aria-live="polite"></section>
+  </main>
+  <script src="/static/common.js"></script>
+  <script src="/static/signal.js"></script>
+  <script src="/static/capture.js"></script>
+</body>
+</html>

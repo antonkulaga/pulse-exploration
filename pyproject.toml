@@ -1,0 +1,26 @@
+[project]
+name = "pulse-exploration"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "av>=19.0.2",
+    "fastapi>=0.159.1",
+    "matplotlib>=3.11.2",
+    "neurokit2>=0.2.13",
+    "numpy>=2.5.4",
+    "open-rppg>=0.1.1",
+    "opencv-python>=5.0.0.93",
+    "polars>=2.0.0",
+    "python-multipart>=0.0.32",
+    "scipy>=1.18.1",
+    "setuptools>=81,<82",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]

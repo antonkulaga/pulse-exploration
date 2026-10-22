@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Pulse Video Upload</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="upload" data-endpoint="/camera/video">
+  <header class="top">
+    <a href="/">&larr; Pulse</a>
+    <span class="badge">tier: video</span>
+  </header>
+  <main>
+    <h1>Measure from a video</h1>
+    <p class="lede">Record 30–60 s with the phone's own camera app, then upload the file to the laptop.
+      No install and no certificate needed.</p>
+
+    <section class="card">
+      <h2>1. Choose what to film</h2>
+      <div class="seg" role="radiogroup" aria-label="Measurement mode">
+        <label><input type="radio" name="mode" value="finger" checked>Fingertip<br><small>rear camera + flash</small></label>
+        <label><input type="radio" name="mode" value="face">Face<br><small>front camera</small></label>
+      </div>
+
+      <div class="howto" data-for="finger">
+        <ol>
+          <li>In the camera app pick <b>Video</b> at <b>1x</b> (the main lens). <b>1080p</b> at 30 or 60 fps is ideal;
+            4K or 8K only makes the upload slow. If the app has <i>Auto FPS</i> or stabilisation, turn them off.</li>
+          <li>Turn the <b>flash on</b> in video mode so the light stays on while recording.</li>
+          <li>Rest the pad of one fingertip <b>lightly</b> over the main lens and the flash. The picture should turn
+            evenly red. Do not press hard: pressure squeezes the blood out.</li>
+          <li>Rest your hand and the phone on a table. Hold still and stay quiet for <b>30–60 s</b>.</li>
+          <li>Warm hands give a stronger signal.</li>
+        </ol>
+      </div>
+      <div class="howto" data-for="face" hidden>
+        <ol>
+          <li>Use the <b>front camera</b> at arm's length (40–60 cm), with your face filling most of the picture.
+            Prop the phone up if you can.</li>
+          <li>Turn off <b>beauty, face retouch and filters</b>: they smooth away the tiny colour changes this measures.</li>
+          <li>Light your face <b>evenly from the front</b>, for example facing a window. Avoid light behind you and
+            flickering lamps.</li>
+          <li>Sit still, breathe normally and do not talk for <b>30–60 s</b>. 1080p at 30 fps is plenty.</li>
+          <li>Face video gives heart rate only, with larger errors than the fingertip.</li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. Record or pick a video</h2>
+      <label class="btn primary" id="record-label">
+        <span id="record-text">Record with the rear camera</span>
+        <input id="record" class="visually-hidden" type="file" accept="video/*" capture="environment">
+      </label>
+      <label class="btn">
+        Choose an existing video
+        <input id="pick" class="visually-hidden" type="file" accept="video/*">
+      </label>
+      <p class="muted">Recording from here opens the camera app in a simple mode. For more settings (60 fps, a Pro or
+        manual video mode), record in the camera app first and then choose the file.</p>
+      <div id="file-info" class="notice ok" hidden></div>
+      <div id="file-warn" class="notice" hidden></div>
+    </section>
+
+    <section class="card">
+      <h2>3. Upload and analyse</h2>
+      <button id="send" class="btn primary" type="button" disabled>Upload and analyse</button>
+      <div id="progress" hidden>
+        <progress id="bar" max="100" value="0"></progress>
+        <div id="progress-text" class="muted"></div>
+        <button id="cancel" class="btn" type="button">Cancel</button>
+      </div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="result" class="card" hidden aria-live="polite"></section>
+  </main>
+  <script src="/static/common.js"></script>
+  <script src="/static/upload.js"></script>
+</body>
+</html>
