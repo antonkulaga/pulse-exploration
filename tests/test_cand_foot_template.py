@@ -183,6 +183,22 @@ def test_motion_gate_rejects_beats_during_movement():
     assert (q[(b < 45_000) | (b > 75_000)] >= 0.5).mean() > 0.9
 
 
+def test_axis_gate_catches_wrist_turns_the_magnitude_misses():
+    rng = np.random.default_rng(5)
+    t = np.arange(0, 60_000, 40.0)
+    acc = _rest_acc(t, rng)
+    turn = (t > 20_000) & (t < 40_000)
+    ang = 0.8 * np.sin(2 * np.pi * 1.5 * t[turn] / 1000)  # gravity swings between two axes, |a| stays 1 g
+    g = np.linalg.norm(acc[turn], axis=1)
+    acc[turn] = np.column_stack([g * np.cos(ang), g * np.sin(ang), np.zeros(turn.sum())])
+    mag = cft.motion_level(t, acc, 2.0)
+    axis = cft.axis_level(t, acc, 2.0)
+    mid = (t > 25_000) & (t < 35_000)
+    assert np.median(mag[1][mid]) < 1.0  # the magnitude gate alone lets this through
+    assert np.median(axis[1][mid]) > 3.0
+    assert np.percentile(axis[1][(t < 15_000) | (t > 45_000)], 95) < 0.5
+
+
 @needs_data
 def test_p02_through_the_harness():
     rows, info = bench.score_participant("P02", cft.FootTemplateEstimator())

@@ -206,16 +206,44 @@ An independent review re-read the harness and candidates and re-ran parts with i
 - **17 held-out participants.** Enough to rule out the paper's failure mode, not to set tight
   population limits.
 
-## What this means for the app
+## What the server does with this (analysis version 0.3)
 
-- The no-SDK tier can report HRV from still stretches. The current server labels 25 Hz HRV
-  "experimental" at best and uses a motion threshold tuned on one recording; `foot_template` or
-  `motion_denoise` with its own accept windows is the better basis.
-- With the SDK, Samsung's IBI list must be cleaned before use. The server already drops intervals
-  outside 300–2000 ms or more than 25% from the local median, but not the lost-sample intervals,
-  which account for most of what is left (8.4 → 4.4 ms here). Cleaned, it and the 25 Hz PPG are
-  about equally good, so in the SDK tier they can check each other: agreement within a few ms is
-  evidence that a window is trustworthy.
+`pulse_exploration/watch_session.py`, which serves `/runs/<run>/analysis`, now uses these results.
+
+- **25 Hz PPG HRV (`sdk_ppg`, `hr_raw`) comes from `foot_template`**, with its own beat-shape,
+  motion and artifact checks. A run is cut into windows of about 60 s, spanning the whole recording
+  so off-wrist time counts against them. A window counts when at least half its expected intervals
+  survive (and at least 10), as in the benchmark; HRV uses the intervals of the windows that count.
+- **Labels.** `sdk_ppg`, the source the benchmark validated, is "good" with at least 54 s of
+  accepted windows. `hr_raw` stays "experimental" until it has been checked against the watch ECG
+  (`HRV25_BEST`). Shorter accepted stretches are "experimental", and no accepted window is
+  "unreliable".
+- **Per-axis motion gate.** `foot_template`'s gate looks at the acceleration magnitude, which a
+  wrist turn barely changes. On synthetic runs that let badly timed beats through (timing error SD
+  270 ms). The server adds a per-axis gate (`axis_max` = 1.0 m/s² over 2 s), chosen on P02–P06
+  where 95% of seated-rest seconds stay below it. On the held-out set it costs 2 points of coverage
+  at the same error (3.2 vs 3.1 ms). The accelerometer is averaged to 25 Hz first, because
+  `foot_template` assumes 25 Hz and the phone's Android accelerometer runs at 100 Hz.
+- **Samsung's IBI list** is cleaned as `samsung_ibi_clean`: outliers against the median of 11, and
+  isolated intervals more than 30 ms shorter than both neighbours' mean. Its motion check is moved
+  6 s back, because Samsung lists each beat about 6 s after it happened. On your SM-R965F the list
+  matched `sdk_ppg` beats 5.2–7.0 s earlier, and the first rows of a run list beats from before the
+  recording.
+- **HRV priority** is now ECG, `sdk_ppg`, Samsung IBIs, 100 Hz PPG, `hr_raw`. When `sdk_ppg` (or
+  `hr_raw`) and Samsung's IBIs are both usable and more than 10 ms apart, the analysis warns
+  (`hrv_sources_disagree`).
+- **Motion threshold** for the rest of the analysis (`MOTION_RMS`) went from 0.2 to 0.5 m/s², chosen
+  on GalaxyPPG P02–P06: it keeps 92% of seated-rest and 96% of stress-task seconds and no walking or
+  running second. 0.2, tuned on one of your recordings, called a still run 36% motion.
+
+**High HRV is the weak spot of both lost-sample corrections.** On ECG beats, which have no lost
+samples, `foot_template`'s correction finds 6–23 false losses per hour at RMSSD around 20 ms but
+250 per hour at 46 ms, close to the real rate of about 330. Samsung's rule drops 1% of genuine
+intervals at RMSSD 20 ms and 11% at 46 ms. Your own 30 s recording is in that regime: `sdk_ppg`
+59 ms and `hr_raw` 63 ms agree, but cleaned Samsung gives 36 ms (69 ms without the lost-sample
+rule). Both paths add a note above 50 ms or when the rule drops more than 10% of intervals. Gating
+the rule on how calm the neighbouring intervals are was tried and rejected: on P02–P06 it fixed the
+high-HRV bias (−7.6 → +2.8 ms) but worsened everyone else (3.5 → 5.4 ms).
 
 ## Reproduce
 

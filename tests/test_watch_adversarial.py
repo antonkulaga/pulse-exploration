@@ -177,8 +177,7 @@ def test_all_zero_ibi_lists(base, tmp_path):
     assert not [e for e in res["metrics"]["hrv"]["estimates"] if e["source"] == "sdk_hr"]
     skipped = {s["source"]: s["reason"] for s in res["metrics"]["hrv"]["skipped"]}
     assert "too few valid Samsung IBIs" in skipped["sdk_hr"]
-    assert res["metrics"]["hrv"]["chosen"]["source"] in ("sdk_ppg", "hr_raw")
-    assert res["metrics"]["hrv"]["chosen"]["reliability"] in ("experimental", "unreliable")
+    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_ppg"  # the PPG does not depend on the IBI lists
     assert res["metrics"]["hr"]["chosen"]["source"] == "sdk_hr"  # HR rows are still fine
     assert abs(res["metrics"]["hr"]["chosen"]["value"] - truth.hr_bpm(*STILL)) <= 3
 
@@ -222,7 +221,7 @@ def test_ecg_mostly_lead_off_falls_back(base, tmp_path):
     res = w.analyze_run(run, write=False)
     ecg = [e for e in res["metrics"]["hrv"]["estimates"] if e["source"] == "sdk_ecg"]
     assert not ecg or ecg[0]["reliability"] == "unreliable"
-    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_hr"
+    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_ppg"  # next in line after the ECG
 
 
 def _set_off_wrist(run: Path, a: float, b: float) -> None:

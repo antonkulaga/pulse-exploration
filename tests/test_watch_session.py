@@ -129,27 +129,33 @@ def test_25hz_hrv_experimental_from_motion_free_windows(runs):
     assert hrv["source"] == "hr_raw" and hrv["feature"] == "ppg"
     assert hrv["reliability"] == "experimental"
     gate = hrv["details"]["gate"]
-    assert gate["passed"] and gate["motion_checked"] and gate["rejected_motion"] + gate["rejected_quality"] > 0
+    assert gate["passed"] and gate["motion_checked"] and gate["method"] == "foot_template"
+    assert gate["beats_rejected"] > 0
+    # two ~60 s windows: the second is half motion (90-120 s) and keeps too few intervals
+    assert [x["accepted"] for x in gate["windows"]] == [True, False]
     spans = hrv["details"]["spans_s"]
     for a, b in spans:  # nothing from the motion burst or its padding
         assert not truth.in_motion(np.linspace(a, b, 50), pad=w.MOTION_PAD_S).any(), (a, b)
         assert b <= 90 - w.MOTION_PAD_S
-    assert 60 <= hrv["value"]["window_s"] <= 90
+    assert 45 <= hrv["value"]["window_s"] <= 90
     truth_rmssd = truth_rmssd_in_spans(truth, spans, pulse=True)
     print(f"\n25 Hz RMSSD {hrv['value']['rmssd_ms']} ms vs truth {truth_rmssd:.1f} ms")
     assert abs(hrv["value"]["rmssd_ms"] - truth_rmssd) <= 10
     assert "motion" in codes(res)
 
 
-def test_motion_makes_25hz_hrv_unreliable(runs):
+def test_motion_leaves_no_usable_25hz_hrv(runs):
     _, truth, res = runs["moving"]
-    e = est(res, "hrv", "hr_raw")
-    assert e["reliability"] == "unreliable"
-    assert not e["details"]["gate"]["passed"] and e["details"]["gate"]["reasons"]
-    assert res["metrics"]["hrv"]["chosen"]["reliability"] == "unreliable"
-    assert {"motion", "hrv_unreliable"} <= codes(res)
-    for a, b in e["details"]["spans_s"]:  # still only motion-free intervals
-        assert not truth.in_motion(np.linspace(a, b, 20)).any(), (a, b)
+    found = [e for e in res["metrics"]["hrv"]["estimates"] if e["source"] == "hr_raw"]
+    assert all(e["reliability"] == "unreliable" for e in found)
+    chosen = res["metrics"]["hrv"]["chosen"]
+    assert chosen is None or chosen["reliability"] == "unreliable"
+    assert "motion" in codes(res) and codes(res) & {"no_hrv", "hrv_unreliable"}
+    if not found:  # foot_template kept too few beats: the reason is reported
+        assert any(s["source"] == "hr_raw" for s in res["metrics"]["hrv"]["skipped"])
+    for e in found:
+        for a, b in e["details"]["spans_s"]:  # still only motion-free intervals
+            assert not truth.in_motion(np.linspace(a, b, 20)).any(), (a, b)
 
 
 def test_no_accelerometer_means_unreliable(runs, tmp_path):
@@ -169,12 +175,16 @@ def test_full_tier_priority(runs):
     _, truth, res = runs["full"]
     assert res["tier"] == "all"
     hrv = res["metrics"]["hrv"]
-    assert [e["source"] for e in hrv["estimates"]] == ["sdk_ecg", "sdk_hr", "sdk_ppg", "hr_raw"]
+    assert [e["source"] for e in hrv["estimates"]] == ["sdk_ecg", "sdk_ppg", "sdk_hr", "hr_raw"]
     assert hrv["chosen"]["source"] == "sdk_ecg" and hrv["chosen"]["reliability"] == "reference"
     assert est(res, "hrv", "sdk_hr")["reliability"] == "good"
     assert est(res, "hrv", "sdk_hr")["feature"] == "ibi"
-    assert est(res, "hrv", "sdk_ppg")["reliability"] == "experimental"
-    assert est(res, "hrv", "hr_raw")["reliability"] == "experimental"
+    assert est(res, "hrv", "sdk_ppg")["reliability"] == "good"  # the benchmarked source
+    assert est(res, "hrv", "hr_raw")["reliability"] == "experimental"  # not yet checked against the ECG
+    for src in ("sdk_ppg", "hr_raw"):  # the per-axis gate keeps the 90-120 s wrist shake out
+        for a, b in est(res, "hrv", src)["details"]["spans_s"]:
+            assert not truth.in_motion(np.linspace(a, b, 50)).any(), (src, a, b)
+    assert "hrv_sources_disagree" not in codes(res)
     hr = res["metrics"]["hr"]
     assert hr["chosen"]["source"] == "sdk_hr"
     assert {e["source"] for e in hr["estimates"]} == {"sdk_hr", "hr", "sdk_ecg", "sdk_ppg", "hr_raw"}
@@ -199,6 +209,36 @@ def test_ecg_hrv_matches_truth(runs):
     assert abs(e["value"]["n_beats"] - (len(truth.intervals(a, b)) + 1)) <= 2
 
 
+def test_samsung_ibi_lost_sample_interval_dropped():
+    """A smooth rhythm (60 bpm, slow 20 ms swing) where one listed interval is a sample period
+    (40 ms) short, the error a silently lost PPG sample causes: that interval is dropped and RMSSD
+    comes back to the smooth rhythm's."""
+    import polars as pl
+
+    n = 90
+    ibi = 1000 + 20 * np.sin(2 * np.pi * np.arange(n) / 12)
+    clean_rmssd = float(np.sqrt(np.mean(np.diff(ibi) ** 2)))
+    lost = ibi.copy()
+    lost[45] -= 40.0
+    t0 = 1_792_700_000_000
+    ends = t0 + np.cumsum(ibi)
+    rows = {"timestamp_ms": [], "wall_ms": [], "hr": [], "hr_status": [], "ibi_ms": [], "ibi_status": []}
+    for k in range(n):  # one interval per 1 s row
+        rows["timestamp_ms"].append(int(ends[k]))
+        rows["wall_ms"].append(int(ends[k]) + 500)
+        rows["hr"].append(60)
+        rows["hr_status"].append(1)
+        rows["ibi_ms"].append(str(int(round(lost[k]))))
+        rows["ibi_status"].append("0")
+    df = pl.DataFrame(rows)
+    clock = w._Clock({"start_wall_ms": str(t0)}, {"sdk_hr": df})
+    e, why = w._samsung_ibi(df, clock, w._Motion(None))
+    assert why is None
+    assert e["details"]["dropped_lost_sample"] == 1
+    assert abs(e["value"]["rmssd_ms"] - clean_rmssd) < 1.0
+    assert e["reliability"] == "experimental"  # no accelerometer: motion not checked
+
+
 def test_samsung_ibi_filtering(runs):
     _, truth, res = runs["full"]
     e = est(res, "hrv", "sdk_hr")
@@ -213,15 +253,19 @@ def test_samsung_ibi_filtering(runs):
     assert any("no beat times" in n for n in e["notes"])
 
 
-def test_ibi_chosen_without_ecg(runs, tmp_path):
+def test_sdk_ppg_then_ibi_chosen_without_ecg(runs, tmp_path):
     run = copy_run(runs["full"][0], tmp_path, drop=("sdk_ecg.csv",))
     caps = json.loads((run / w.CAPABILITIES_FILE).read_text())
     caps["features"]["ecg"] = {"available": False, "tier": None, "sources": [], "reason": "not recorded in this run"}
     (run / w.CAPABILITIES_FILE).write_text(json.dumps(caps))
     res = w.analyze_run(run)
-    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_hr"
+    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_ppg"
     assert res["metrics"]["hrv"]["chosen"]["reliability"] == "good"
     assert res["metrics"]["hr"]["chosen"]["source"] == "sdk_hr"
+    (run / "sdk_ppg.csv").unlink()
+    res = w.analyze_run(run)
+    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_hr"
+    assert res["metrics"]["hrv"]["chosen"]["reliability"] == "good"
 
 
 # --------------------------------------------------------------------------------------------
@@ -241,7 +285,7 @@ def test_inferred_capabilities_all(runs):
     assert f["motion"]["sources"] == ["acc", "gyro"] and f["motion"]["tier"] == "25hz"
     assert not f["ecg"]["available"] and f["ecg"]["reason"] == "not recorded in this run"
     assert not f["ppg100"]["available"]
-    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_hr"
+    assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_ppg"
     assert res["metrics"]["hr"]["chosen"]["source"] == "sdk_hr"
 
 

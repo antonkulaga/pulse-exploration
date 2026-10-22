@@ -70,6 +70,9 @@ class FootTemplateEstimator:
     corr_min: float = 0.80
     motion_win_s: float = 2.0
     motion_max: float | None = 1.0
+    # m/s^2: also reject beats where the per-axis deviation over motion_win_s exceeds this. Turning
+    # the wrist moves the axes but barely the magnitude; off by default (the benchmarked settings)
+    axis_max: float | None = None
     art: bool = True
     art_med_beats: int = 11
     art_short: float = 0.7
@@ -90,6 +93,7 @@ class FootTemplateEstimator:
         t = np.asarray(ppg_t_ms, dtype=np.float64)
         v = np.asarray(ppg, dtype=np.float64)
         motion = motion_level(acc_t_ms, acc_xyz, self.motion_win_s)
+        axis = axis_level(acc_t_ms, acc_xyz, self.motion_win_s) if self.axis_max is not None else None
         cuts = np.r_[0, np.where(np.diff(t) > GAP_MS)[0] + 1, len(t)]
         beats, qual, corr = [], [], []
         n_drops = 0
@@ -104,6 +108,8 @@ class FootTemplateEstimator:
             q[(bt < t[a] + EDGE_MS) | (bt > t[b - 1] - EDGE_MS)] = 0.0
             if self.motion_max is not None and motion is not None:
                 q[np.interp(bt, motion[0], motion[1]) > self.motion_max] = 0.0
+            if axis is not None:
+                q[np.interp(bt, axis[0], axis[1]) > self.axis_max] = 0.0
             if self.art:
                 bt, q, c = artifact_correct(bt, q, c, *art)
             if self.drops:
@@ -278,6 +284,28 @@ def motion_level(acc_t_ms: np.ndarray, acc_xyz: np.ndarray, win_s: float) -> tup
             continue
         f = signal.sosfiltfilt(sos, mag[a:b] - mag[a:b].mean())
         out[a:b] = np.sqrt(np.convolve(f * f, np.ones(k) / k, mode="same"))
+    return at, out
+
+
+def axis_level(acc_t_ms: np.ndarray, acc_xyz: np.ndarray, win_s: float) -> tuple[np.ndarray, np.ndarray] | None:
+    """(t, square root of the summed per-axis variance over a running win_s window), m/s^2."""
+    at = np.asarray(acc_t_ms, dtype=np.float64)
+    if len(at) < 4 * FS:
+        return None
+    xyz = np.asarray(acc_xyz, dtype=np.float64)
+    out = np.zeros(len(at))
+    cuts = np.r_[0, np.where(np.diff(at) > GAP_MS)[0] + 1, len(at)]
+    k = max(1, int(round(win_s * FS)))
+    box = np.ones(k)
+    for a, b in itertools.pairwise(cuts):
+        if b - a < 30:
+            out[a:b] = np.inf
+            continue
+        x = xyz[a:b] - xyz[a:b].mean(axis=0)
+        n = np.convolve(np.ones(b - a), box, "same")  # samples in each window, fewer at the edges
+        var = sum(np.convolve(x[:, i] ** 2, box, "same") / n - (np.convolve(x[:, i], box, "same") / n) ** 2
+                  for i in range(3))
+        out[a:b] = np.sqrt(np.clip(var, 0.0, None))
     return at, out
 
 

@@ -15,15 +15,18 @@ Every estimate is ``{value, source, feature, tier, reliability, n, notes, detail
 * ``hr`` (bpm): Samsung's algorithm (sdk_hr, hr; 1 Hz), ECG R-peaks, and PPG beats + spectrum
   (sdk_ppg100 green, sdk_ppg green, hr_raw AC channel v5).
 * ``hrv`` (``{rmssd_ms, sdnn_ms, pnn50, mean_nn_ms, n_beats, window_s}``) from, in priority order,
-  ECG R-peaks (reference with >= 20 s lead-on), Samsung IBI lists, 100 Hz on-demand PPG (good only
-  when the quality gate passes) and 25 Hz PPG (experimental at best, unreliable when the gate fails).
+  ECG R-peaks (reference with >= 20 s lead-on), 25 Hz SDK green PPG, Samsung IBI lists, 100 Hz
+  on-demand PPG (good only when the quality gate passes) and 25 Hz hr_raw. 25 Hz PPG uses
+  foot_template (``hrv/cand_foot_template.py``, see docs/hrv-25hz-benchmark.md) in ~60 s windows
+  that keep at least half their expected intervals; sdk_ppg is good with >= 54 s of such windows,
+  hr_raw experimental at best until it is checked against the watch ECG.
 * ``motion``, ``on_wrist``, ``skin_temp``, ``spo2`` summaries.
 
 The chosen estimate is the first one in the metric's priority order that is not unreliable (the
 first one overall when all are). Successive differences (RMSSD, pNN50) only use intervals that
 are adjacent in time, never pairs across a rejected beat or a gap.
 
-PPG beats (25 and 100 Hz): uniform grid, 0.5-3.5 Hz band-pass for detection and 0.5-8 Hz for
+PPG beats for HR (25 and 100 Hz) and 100 Hz HRV: uniform grid, 0.5-3.5 Hz band-pass for detection and 0.5-8 Hz for
 timing, polyphase upsampling to ~200 Hz, coarse peaks, then template matching (normalised
 cross-correlation with the median beat, parabolic sub-sample refinement, two passes), NeuroKit2
 ``signal_fixpeaks`` (Kubios) for missed / extra / ectopic beats. Beats it moved or inserted are not
@@ -49,9 +52,13 @@ import polars as pl
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy import signal as sps
 
+from pulse_exploration.hrv.cand_foot_template import FS as FT_FS
+from pulse_exploration.hrv.cand_foot_template import FootTemplateEstimator
 from pulse_exploration.watch_raw import OFFSET, read_csv
 
-ANALYSIS_VERSION = "watch-session-0.2"  # 0.2: suspected dropped Samsung IBIs, no "good" without motion check
+# 0.2: suspected dropped Samsung IBIs, no "good" without motion check
+# 0.3: 25 Hz PPG HRV by foot_template; Samsung IBIs cleaned of lost-sample intervals; sdk_ppg before sdk_hr
+ANALYSIS_VERSION = "watch-session-0.3"
 ANALYSIS_FILE = "analysis.json"
 CAPABILITIES_FILE = "capabilities.json"
 CAPABILITIES_SCHEMA = 1
@@ -72,7 +79,7 @@ SDK_TYPES = {"sdk_ppg": "PPG_CONTINUOUS", "sdk_hr": "HEART_RATE_CONTINUOUS", "sd
 POLICY_REASON = "needs Samsung Health Platform developer mode"
 
 HR_PRIORITY = ("sdk_hr", "hr", "sdk_ecg", "sdk_ppg100", "sdk_ppg", "hr_raw")
-HRV_PRIORITY = ("sdk_ecg", "sdk_hr", "sdk_ppg100", "sdk_ppg", "hr_raw")
+HRV_PRIORITY = ("sdk_ecg", "sdk_ppg", "sdk_hr", "sdk_ppg100", "hr_raw")  # sdk_ppg beat cleaned IBIs on GalaxyPPG
 PPG_SOURCES = ("sdk_ppg100", "sdk_ppg", "hr_raw")
 
 MIN_RUN_S = 20.0  # shorter runs get a "too_short" warning
@@ -82,7 +89,9 @@ LOCAL_DEV = 0.25  # an interval further than this share from its local median is
 MIN_DIFFS = 5  # fewest successive differences for an HRV value at all
 # accelerometer motion gate
 MOTION_WINDOW_S = 1.0
-MOTION_RMS = 0.2  # m/s^2, RMS per-axis deviation in a 1 s window; a still wrist reads ~0.06 (SM-R965F)
+# m/s^2, RMS per-axis deviation in a 1 s window; a still wrist reads ~0.06 (SM-R965F). On GalaxyPPG
+# P02-P06 it keeps 92 % of seated-rest and 96 % of stress-task seconds and no walking or running
+MOTION_RMS = 0.5
 MOTION_PAD_S = 1.0
 # PPG beat quality gate
 FS_UP = 200.0
@@ -92,6 +101,20 @@ GATE_MIN_S = 20.0  # seconds of clean, motion-free intervals
 GATE_MIN_NN = 20
 GATE_MIN_SEGMENT_S = 10.0  # longest contiguous clean stretch
 GATE_MAX_ARTIFACT = 0.2  # share of motion-free beats that fixpeaks had to move, insert or remove
+# HRV from 25 Hz PPG (sdk_ppg, hr_raw): foot_template from the GalaxyPPG benchmark
+# (docs/hrv-25hz-benchmark.md: RMSSD median error ~3 ms on 60 s windows at rest), with its own beat
+# shape, accelerometer and artifact checks instead of the gate above
+HRV25_SOURCES = ("sdk_ppg", "hr_raw")
+HRV25_WINDOW_S = 60.0  # the window length the benchmark validated
+HRV25_MIN_KEPT = 0.5  # a window counts when this share of its expected intervals survive ...
+HRV25_MIN_IBI = 10  # ... and at least this many
+HRV25_BEST = {"sdk_ppg": "good", "hr_raw": "experimental"}  # hr_raw: not yet checked against the watch ECG
+# m/s^2, per-axis accelerometer deviation over 2 s: catches wrist turns the magnitude gate misses.
+# Chosen on GalaxyPPG P02-P06 (95 % of seated-rest seconds stay below it); held out it costs 2 points
+# of coverage at the same error (3.2 vs 3.1 ms)
+HRV25_AXIS_MAX = 1.0
+HRV25_HIGH_RMSSD_MS = 50.0  # above this the lost-sample correction also trims genuine short intervals
+DISAGREE_RMSSD_MS = 10.0  # two good HRV sources further apart than this get a warning
 # ECG
 ECG_FS = 500.0
 ECG_REFERENCE_S = 20.0
@@ -99,6 +122,13 @@ ECG_MIN_S = 10.0
 # Samsung IBI: rows arrive at 1 Hz; a longer gap between rows means a row (and its beats) is missing
 IBI_ROW_GAP_S = 1.5
 IBI_DROP_SHARE = 0.5
+# cleaning validated on GalaxyPPG (bench.SamsungIBIClean): outliers against the median of 11 ...
+IBI_LOCAL_DEV = 0.2
+IBI_LOCAL_HALF = 5
+IBI_SLIP_MS = 30.0  # ... and isolated short intervals: the PPG stream silently loses a sample
+# Samsung lists a beat ~6 s after it happened: 5.2-7.0 s against sdk_ppg beats on SM-R965F (one 30 s
+# run), 6.3-8.5 s against ECG on GalaxyPPG (Watch5); the first rows of a run list beats from before it
+IBI_LAG_S = 6.0
 
 
 # --------------------------------------------------------------------------------------------
@@ -417,7 +447,8 @@ class _Motion:
         return inside & (cum[np.clip(i1, 0, n - 1) + 1] - cum[np.clip(i0, 0, n - 1)] == 0)
 
 
-def _motion(tables: dict[str, pl.DataFrame], clock: _Clock) -> _Motion:
+def _accelerometer(tables: dict[str, pl.DataFrame], clock: _Clock) -> tuple[str, np.ndarray, np.ndarray] | None:
+    """(source, run seconds, m/s^2 n x 3), finite rows only; Android acc preferred."""
     if "acc" in tables:
         src, df = "acc", tables["acc"]
         a = np.column_stack([_col(df, c) for c in ("v0", "v1", "v2")])
@@ -427,10 +458,17 @@ def _motion(tables: dict[str, pl.DataFrame], clock: _Clock) -> _Motion:
         mag = np.nanmedian(np.linalg.norm(a, axis=1))
         a = a * (9.80665 / mag) if mag > 0 else a
     else:
-        return _Motion(None)
+        return None
     t = clock.times(df)
     ok = np.isfinite(t) & np.all(np.isfinite(a), axis=1)
-    t, a = t[ok], a[ok]
+    return src, t[ok], a[ok]
+
+
+def _motion(tables: dict[str, pl.DataFrame], clock: _Clock) -> _Motion:
+    acc = _accelerometer(tables, clock)
+    if acc is None:
+        return _Motion(None)
+    src, t, a = acc
     if len(t) < 20 or t.max() - t.min() < 2 * MOTION_WINDOW_S:
         return _Motion(None)
     order = np.argsort(t, kind="stable")
@@ -753,6 +791,110 @@ def _ppg_hrv(b: _Beats, iv: dict) -> tuple[dict | None, str | None]:
                      {"gate": gate, "spans_s": spans, "fs_hz": _r(b.fs)}), None
 
 
+def _acc_25hz(acc: tuple[str, np.ndarray, np.ndarray] | None) -> tuple[np.ndarray, np.ndarray]:
+    """Accelerometer as 40 ms bin means (ms, n x 3): foot_template's motion gate assumes 25 Hz."""
+    if acc is None or not len(acc[1]):
+        return np.zeros(0), np.zeros((0, 3))
+    _, t, a = acc
+    order = np.argsort(t, kind="stable")
+    t, a = t[order], a[order]
+    b = np.floor(t * FT_FS).astype(np.int64)
+    k = b - b[0]
+    cnt = np.bincount(k)
+    has = cnt > 0
+    xyz = np.column_stack([np.bincount(k, a[:, i])[has] / cnt[has] for i in range(3)])
+    return (np.flatnonzero(has) + b[0] + 0.5) / FT_FS * 1000, xyz
+
+
+def _ppg_hrv25(alias: str, t: np.ndarray, x: np.ndarray, valid: np.ndarray,
+               acc25: tuple[np.ndarray, np.ndarray]) -> tuple[dict | None, str | None]:
+    """HRV from 25 Hz PPG with foot_template. The run is cut into windows of about HRV25_WINDOW_S;
+    a window counts when enough of its expected intervals survive the estimator's own beat-shape,
+    motion and artifact checks, and HRV uses the intervals of the windows that count. Windows span
+    the whole recording, so off-wrist time counts against them."""
+    m = np.isfinite(t) & np.isfinite(x)
+    if not m.any():
+        return None, "no 25 Hz PPG samples"
+    t_first, t_last = float(t[m].min()), float(t[m].max())
+    m &= valid
+    t, x = t[m], x[m]
+    order = np.argsort(t, kind="stable")
+    t, x = t[order], x[order]
+    keep = np.r_[True, np.diff(t) > 0]
+    t, x = t[keep], x[keep]
+    if len(t) < 2 or t[-1] - t[0] < 10:
+        return None, "under 10 s of on-wrist 25 Hz PPG"
+    acc_t, acc_xyz = acc25
+    motion_checked = len(acc_t) >= 4 * FT_FS  # foot_template ignores shorter accelerometer data
+    est = FootTemplateEstimator(invert=False, axis_max=HRV25_AXIS_MAX)  # _ppg_input already turned the pulse upright
+    out = est.estimate(t * 1000, x, acc_t, acc_xyz)
+    bt = np.asarray(out["beats_ms"], float) / 1000
+    good = np.asarray(out["quality"], float) >= 0.5
+    if good.sum() < 6:
+        return None, f"foot_template kept {int(good.sum())} beats"
+    a, e = bt[:-1], bt[1:]
+    nn = (e - a) * 1000
+    ok = good[:-1] & good[1:]  # rejected beats, and the placeholder after each recording gap, break intervals
+    med = float(np.median(nn[ok])) if ok.any() else math.nan
+    t0, t1 = t_first, t_last
+    n_win = max(1, round((t1 - t0) / HRV25_WINDOW_S))
+    width = (t1 - t0) / n_win
+    widx = np.clip(((a - t0) // width).astype(int), 0, n_win - 1)
+    use = np.zeros(len(nn), bool)
+    windows = []
+    for w in range(n_win):
+        inside = ok & (widx == w)
+        expected = width * 1000 / med if math.isfinite(med) else 0.0
+        n_ibi = int(inside.sum())
+        accepted = (n_ibi >= max(HRV25_MIN_IBI, HRV25_MIN_KEPT * expected)
+                    and int((inside[1:] & inside[:-1]).sum()) >= MIN_DIFFS)
+        if accepted:
+            use |= inside
+        windows.append({"start_s": _r(t0 + w * width, 1), "end_s": _r(t0 + (w + 1) * width, 1),
+                        "intervals": n_ibi, "expected": _r(expected, 1), "accepted": bool(accepted)})
+    accepted_s = width * sum(w["accepted"] for w in windows)
+    reasons = []
+    if not motion_checked:
+        reasons.append("no accelerometer: motion not checked")
+    if not use.any():
+        reasons.append(f"no {width:.0f} s window kept {HRV25_MIN_KEPT:.0%} of its expected intervals "
+                       f"(and >= {HRV25_MIN_IBI})")
+    passed = not reasons
+    vals = _hrv_values(_segments(nn, use if use.any() else ok))
+    if vals is None:
+        return None, "too few clean beats for HRV"
+    if not passed:
+        rel = "unreliable"
+    elif accepted_s < 0.9 * HRV25_WINDOW_S:
+        rel = "experimental"  # shorter than the window the benchmark validated
+    else:
+        rel = HRV25_BEST[alias]
+    notes = ["25 Hz PPG pulse intervals (pulse-rate variability) by foot_template: steepest upstroke on a "
+             "1 kHz spline, aligned to the running median beat; beats with a poor shape, in motion "
+             "(accelerometer) or flagged as artifacts are not used; silently lost samples are corrected",
+             f"GalaxyPPG benchmark (Galaxy Watch5 SDK green PPG vs chest ECG): RMSSD median error ~3 ms on "
+             f"{HRV25_WINDOW_S:.0f} s windows at rest (docs/hrv-25hz-benchmark.md)"]
+    if HRV25_BEST[alias] != "good":
+        notes.append(f"{alias} has not been checked against the watch ECG yet: {HRV25_BEST[alias]} at best")
+    if passed and accepted_s < 0.9 * HRV25_WINDOW_S:
+        notes.append(f"accepted windows cover {accepted_s:.0f} s, under the validated {HRV25_WINDOW_S:.0f} s")
+    if not passed:
+        notes.append("quality gate failed: " + "; ".join(reasons))
+    if (vals["window_s"] or 0) < SHORT_HRV_S:
+        notes.append(f"ultra-short window ({vals['window_s']} s < {SHORT_HRV_S:.0f} s)")
+    if (vals["rmssd_ms"] or 0) > HRV25_HIGH_RMSSD_MS:
+        notes.append(f"RMSSD above {HRV25_HIGH_RMSSD_MS:.0f} ms: the lost-sample correction may also trim genuine "
+                     "short intervals, so the value may be a few ms low")
+    used = use if use.any() else ok
+    gate = {"passed": passed, "reasons": reasons, "motion_checked": motion_checked, "method": "foot_template",
+            "windows": windows, "accepted_s": _r(accepted_s, 1), "beats_kept": int(good.sum()),
+            "beats_rejected": int((~good).sum()), "intervals_used": int(used.sum()),
+            "lost_samples_corrected": int(est.debug.get("n_drops", 0))}
+    return _estimate(vals, alias, "ppg", rel, int(used.sum()), notes,
+                     {"gate": gate, "spans_s": _merge_spans(a[used], e[used]),
+                      "fs_hz": _r((len(t) - 1) / (t[-1] - t[0]))}), None
+
+
 # --------------------------------------------------------------------------------------------
 # Samsung HR / IBI, ECG, skin temperature, SpO2, on-wrist
 # --------------------------------------------------------------------------------------------
@@ -842,17 +984,24 @@ def _samsung_ibi(df: pl.DataFrame, clock: _Clock, motion: _Motion) -> tuple[dict
         if drift[k] >= top:
             top, top_at = drift[k], k
     gap_before = row_gap | dropped_before
-    ok = status_ok & plaus
-    if ok.any():
-        med = _local_median(vals[ok])
-        dev = np.zeros(len(vals), bool)
-        dev[np.flatnonzero(ok)] = np.abs(vals[ok] - med) > LOCAL_DEV * med
-        plaus &= ~dev
-        ok &= ~dev
-    still = motion.still_between(T[row] - row_sum[row], T[row])
-    ok_all = ok & still
     # adjacency: consecutive in the list, and no missing row in between
     adjacent = np.r_[True, ~(first_in_row[1:] & gap_before[rank[row[1:]]])]
+    ok = status_ok & plaus
+    if ok.any():
+        med = _local_median(vals[ok], half=IBI_LOCAL_HALF)
+        dev = np.zeros(len(vals), bool)
+        dev[np.flatnonzero(ok)] = np.abs(vals[ok] - med) > IBI_LOCAL_DEV * med
+        plaus &= ~dev
+        ok &= ~dev
+    # a lost PPG sample shortens one interval by a sample period: drop isolated short intervals
+    slip = np.zeros(len(vals), bool)
+    if len(vals) > 2:
+        both = ok[1:-1] & ok[:-2] & ok[2:] & adjacent[1:-1] & adjacent[2:]
+        slip[1:-1] = both & (vals[1:-1] - 0.5 * (vals[:-2] + vals[2:]) < -IBI_SLIP_MS)
+    ok &= ~slip
+    # the row lists beats from about IBI_LAG_S earlier: check motion where they happened
+    still = motion.still_between(T[row] - IBI_LAG_S - row_sum[row], T[row] - IBI_LAG_S)
+    ok_all = ok & still
     breaks = ~ok_all | ~adjacent
     # build segments: an interval starts a new segment when it is not adjacent to the previous one
     segs, cur = [], []
@@ -878,13 +1027,20 @@ def _samsung_ibi(df: pl.DataFrame, clock: _Clock, motion: _Motion) -> tuple[dict
               "dropped between batches; successive differences only between intervals listed next to "
               "each other with no missing row and no suspected dropped beat (elapsed time not covered "
               "by the listed intervals) in between"),
-             "dropped intervals with ibi_status != 0, outside 300-2000 ms or > 25 % from the local median"]
+             f"dropped intervals with ibi_status != 0, outside 300-2000 ms, > {IBI_LOCAL_DEV:.0%} from the "
+             f"median of {2 * IBI_LOCAL_HALF + 1}, or > {IBI_SLIP_MS:.0f} ms shorter than both neighbours' mean "
+             "(a silently lost PPG sample)",
+             f"motion checked {IBI_LAG_S} s before each row, where Samsung's listed beats happened"]
     if not motion.checked:
         notes.append("no accelerometer: motion not checked")
     if (hv["window_s"] or 0) < SHORT_HRV_S:
         notes.append(f"ultra-short window ({hv['window_s']} s < {SHORT_HRV_S:.0f} s)")
+    n_status_ok = int((status_ok & np.isfinite(vals)).sum())
+    if (hv["rmssd_ms"] or 0) > HRV25_HIGH_RMSSD_MS or slip.sum() > 0.1 * max(n_status_ok, 1):
+        notes.append(f"{int(slip.sum())} of {n_status_ok} intervals dropped as lost-sample errors: at high HRV that "
+                     "rule also removes genuine short intervals, so RMSSD may be low")
     details = {"intervals": int(len(vals)), "dropped_status": int((~status_ok).sum()),
-               "dropped_implausible": int((status_ok & ~plaus).sum()),
+               "dropped_implausible": int((status_ok & ~plaus).sum()), "dropped_lost_sample": int(slip.sum()),
                "dropped_motion": int((ok & ~still).sum()), "row_gaps": int(row_gap.sum()),
                "suspected_dropped_beats": int(drop_events), "rows_after_suspected_drop": int(dropped_before.sum()),
                "segments": len(segs), "successive_diffs": int(n_diffs), "breaks": int(breaks.sum())}
@@ -1091,19 +1247,24 @@ def analyze_run(run_dir: str | Path, write: bool = True) -> dict:
         keep(hr, "sdk_ecg", hr_e, why or "too few RR intervals")
         keep(hrv, "sdk_ecg", hrv_e, why or "too few RR intervals")
 
+    acc25 = _acc_25hz(_accelerometer(tables, clock))
+
     def run_ppg(alias: str):
         t, x, valid, notes = _ppg_input(alias, tables[alias], clock)
         beats = _ppg_beats(alias, t, x, valid, motion)
-        if beats is None:
-            why = "no usable PPG (under 10 s on-wrist or under 6 beats)"
-            return None, None, why, why
-        iv = _ppg_intervals(beats, motion)
-        h = _ppg_hr(beats, iv, motion)
-        v, why = _ppg_hrv(beats, iv)
+        h = v = None
+        hr_why = hrv_why = "no usable PPG (under 10 s on-wrist or under 6 beats)"
+        if beats is not None:
+            iv = _ppg_intervals(beats, motion)
+            h, hr_why = _ppg_hr(beats, iv, motion), "no heart rate from PPG"
+            if alias not in HRV25_SOURCES:
+                v, hrv_why = _ppg_hrv(beats, iv)
+        if alias in HRV25_SOURCES:
+            v, hrv_why = _ppg_hrv25(alias, t, x, valid, acc25)
         for est in (h, v):
             if est:
                 est["notes"] = notes + est["notes"]
-        return h, v, "no heart rate from PPG", why or "no HRV from PPG"
+        return h, v, hr_why, hrv_why or "no HRV from PPG"
 
     for alias in PPG_SOURCES:
         if alias not in tables:
@@ -1173,6 +1334,13 @@ def analyze_run(run_dir: str | Path, write: bool = True) -> dict:
         if (hv["value"]["window_s"] or 0) < SHORT_HRV_S:
             _warn(warns, "hrv_ultra_short", f"HRV window is {hv['value']['window_s']} s (< {SHORT_HRV_S:.0f} s): "
                   "ultra-short-term values", "info")
+        # PPG and Samsung's IBIs come from the same sensor: when both are usable they should agree
+        usable = {e["source"]: e["value"]["rmssd_ms"] for e in metrics["hrv"]["estimates"]
+                  if e["reliability"] != "unreliable" and e["value"]["rmssd_ms"] is not None}
+        pair = [s for s in ("sdk_ppg", "hr_raw") if s in usable]
+        if "sdk_hr" in usable and pair and abs(usable["sdk_hr"] - usable[pair[0]]) > DISAGREE_RMSSD_MS:
+            _warn(warns, "hrv_sources_disagree", f"RMSSD {usable[pair[0]]} ms from {pair[0]} vs {usable['sdk_hr']} "
+                  f"ms from Samsung's IBIs (> {DISAGREE_RMSSD_MS:.0f} ms apart): treat both with caution", "info")
     if metrics["hr"]["chosen"] is None:
         _warn(warns, "no_hr", "no heart-rate estimate")
 
