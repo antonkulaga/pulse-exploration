@@ -7,8 +7,13 @@ normal-rhythm databases for a 30 fps smartphone camera (IEEE TBME 60(1):203, 201
 - RMSSD / mean interval >= 0.13, here with the 8 largest successive differences left out
   (`TRIM_DIFFS`), so that a few missed, extra or mistimed beats in sinus rhythm do not look like
   AF. On GalaxyPPG's 25 Hz beats this cut false irregular segments from 9.5 % to 0 % (696
-  segments, nobody in AF), while synthetic AF stayed 100 % flagged (median 0.21). The threshold
-  was derived without trimming, so it should be re-checked on real AF recordings.
+  segments, nobody in AF).
+  On MIT-BIH (benchmarks/afdb, 23 AF and 18 normal-rhythm records, beat times jittered by 5 ms
+  to mimic 25 Hz PPG) the trimmed rule flags 88 % of AF segments against 99 % untrimmed, but
+  with the persistence rule both alert in every record with at least 3 minutes of AF (21 of
+  23), and the trimmed rule raises 0.13 false alerts per day in healthy records against 0.96.
+  A threshold of 0.09 keeps 97 % of AF time inside alerts (for tracking known AF) at 1.2 false
+  alerts per day.
 - Shannon entropy of the intervals >= 0.76: the 8 longest and 8 shortest intervals are dropped,
   the rest go into 16 equal-width bins, and the entropy is divided by log(16) (Dash et al., Ann
   Biomed Eng 37:1701, 2009)

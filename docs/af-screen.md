@@ -47,14 +47,51 @@ Samsung's list rarely yields 64 consecutive adjacent intervals, because its one-
 break adjacency, so it is a poor source for this rule. The 95th percentile of the trimmed
 normalised RMSSD in sinus rhythm is about 0.05, well below 0.13.
 
+## Real AF: MIT-BIH
+
+`benchmarks/afdb/run.py` uses PhysioNet's MIT-BIH Atrial Fibrillation Database (25 records of
+about 10 h; 04936 and 05091 excluded for incorrect rhythm labels, as in Lee et al.) and Normal
+Sinus Rhythm Database (18 records of about 24 h), both under the Open Data Commons Attribution
+License v1.0. Only annotation and header files are downloaded, into `data/external/physionet/`.
+Beat times come from the AF database's automatic, uncorrected QRS detections (manually corrected
+ones where they exist) and from the normal-rhythm database's beat annotations, ectopic beats
+included. Segments entirely inside AF count as AF, segments entirely inside normal rhythm as
+sinus; mixed segments and atrial flutter are left out (6,705 AF and 26,318 healthy sinus
+segments). Each rule also ran with 5 and 10 ms of Gaussian jitter on the beat times, to mimic
+25 Hz PPG.
+
+Per 64-beat segment, 5 ms jitter:
+
+| Rule | Sensitivity | Specificity, AF patients' sinus rhythm | Specificity, healthy records |
+|---|---|---|---|
+| Lee et al. (untrimmed, 0.13) | 99.2% | 77.2% | 97.9% |
+| Trimmed, 0.13 (default) | 87.6% | 94.4% | 99.7% |
+| Trimmed, threshold chosen on the other records | 95.9% | 89.9% | 98.2% |
+
+The leave-one-record-out choice settled on 0.09–0.11 (median 0.09). Trimming costs sensitivity
+mostly at 90–120 bpm, where real AF is more regular than the synthetic AF used earlier (81% of
+those segments flagged without jitter).
+
+Alerts (5 of 6 segments), 5 ms jitter:
+
+| Rule | AF records alerted | AF time inside alerts | False alerts per day, AF patients in sinus | False alerts per day, healthy |
+|---|---|---|---|---|
+| Lee et al. (untrimmed, 0.13) | 20 of 23 | 99% | 16.3 | 0.96 |
+| Trimmed, 0.13 (default) | 21 of 23 | 85% | 3.1 | 0.13 |
+| Trimmed, 0.09 | 21 of 23 | 97% | 7.5 | 1.22 |
+
+The two records never alerted had only 1.9 and 2.8 minutes of AF, less than the roughly six
+minutes the persistence rule needs. So the default suits screening (about one false alert per
+week of continuous wear in healthy people); 0.09 suits tracking how much time someone with known
+AF spends in it. False alerts in AF patients' sinus rhythm are frequent under every rule, and some
+may be real arrhythmia the annotations do not label as AF.
+
 ## What is not known
 
-- **Sensitivity on real AF.** GalaxyPPG has no AF, and synthetic AF (independent intervals with a
-  22 % spread) is easier than real AF at fast ventricular rates, which can be more regular. The
-  trimming lowers AF's statistic by about a quarter and the threshold was derived without it.
-  The next check is to run the rule on the MIT-BIH AF and normal-rhythm RR series (PhysioNet, open
-  access), then on wrist PPG with AF (DeepBeat or the Vilnius set).
-- **Older people and ectopic beats.** Frequent premature beats are the main source of false alerts
-  in practice and are rare in GalaxyPPG's young cohort.
+- **Wrist PPG with AF.** MIT-BIH has ECG beat times; jitter mimics 25 Hz timing but not missed
+  beats in a fast irregular rhythm or motion. DeepBeat (wrist PPG, Synapse) or the Vilnius wrist
+  set would test that.
+- **Older people and frequent ectopy.** Premature beats drive false alerts; the normal-rhythm
+  database includes some, GalaxyPPG's young cohort almost none.
 - **Our own nights.** The gate in the build plan is the false-alert rate on our own overnight
   recordings, which need all-night logging to work first.

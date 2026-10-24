@@ -17,6 +17,7 @@ dependencies = [
     "scipy>=1.18.1",
     "setuptools>=81,<82",
     "uvicorn[standard]>=0.54.0",
+    "wfdb>=4.3.1",
 ]
 
 [dependency-groups]

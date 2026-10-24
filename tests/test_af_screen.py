@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -92,3 +93,22 @@ def test_25hz_pulse_wave_af_is_flagged_with_the_screen_settings():
 def test_hrv_cleaning_would_hide_af():
     # the HRV settings reject irregular intervals as artefacts, so no 64-beat run survives
     assert _segments("af", {}) == []
+
+
+PHYSIONET = Path(__file__).resolve().parents[1] / "data" / "external" / "physionet"
+
+
+@pytest.mark.skipif(not (PHYSIONET / "afdb" / "07162.qrs").exists() or not (PHYSIONET / "nsrdb" / "16265.atr").exists(),
+                    reason="MIT-BIH annotations not downloaded")
+def test_mit_bih_af_record_alerts_and_healthy_record_stays_quiet():
+    import wfdb
+
+    fs = wfdb.rdheader(str(PHYSIONET / "afdb" / "07162")).fs
+    af_beats = wfdb.rdann(str(PHYSIONET / "afdb" / "07162"), "qrs").sample / fs * 1000  # AF throughout
+    af_segs = af_screen.segments_from_beats(af_beats)
+    assert np.mean([s.irregular for s in af_segs]) > 0.9 and af_screen.alerts(af_segs)
+    ann = wfdb.rdann(str(PHYSIONET / "nsrdb" / "16265"), "atr")
+    keep = np.array([s in set("NLRBAaJSVrFejnE/fQ?") for s in ann.symbol])
+    sinus_beats = ann.sample[keep] / wfdb.rdheader(str(PHYSIONET / "nsrdb" / "16265")).fs * 1000
+    sinus_segs = af_screen.segments_from_beats(sinus_beats)
+    assert len(sinus_segs) > 1000 and np.mean([s.irregular for s in sinus_segs]) < 0.01
