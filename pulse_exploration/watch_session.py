@@ -806,12 +806,20 @@ def _acc_25hz(acc: tuple[str, np.ndarray, np.ndarray] | None) -> tuple[np.ndarra
     return (np.flatnonzero(has) + b[0] + 0.5) / FT_FS * 1000, xyz
 
 
-def _ppg_hrv25(alias: str, t: np.ndarray, x: np.ndarray, valid: np.ndarray,
-               acc25: tuple[np.ndarray, np.ndarray]) -> tuple[dict | None, str | None]:
-    """HRV from 25 Hz PPG with foot_template. The run is cut into windows of about HRV25_WINDOW_S;
-    a window counts when enough of its expected intervals survive the estimator's own beat-shape,
-    motion and artifact checks, and HRV uses the intervals of the windows that count. Windows span
-    the whole recording, so off-wrist time counts against them."""
+@dataclass
+class _Beats25:
+    t: np.ndarray  # beat times, s from the run start
+    good: np.ndarray  # beats foot_template vouches for
+    t_first: float  # first and last PPG sample, s (on wrist or not)
+    t_last: float
+    fs_hz: float  # on-wrist sample rate
+    motion_checked: bool
+    lost_samples: int  # silently lost samples foot_template corrected for
+
+
+def _hrv25_beats(t: np.ndarray, x: np.ndarray, valid: np.ndarray,
+                 acc25: tuple[np.ndarray, np.ndarray]) -> tuple[_Beats25 | None, str | None]:
+    """foot_template beats of a 25 Hz PPG stream (on-wrist samples only)."""
     m = np.isfinite(t) & np.isfinite(x)
     if not m.any():
         return None, "no 25 Hz PPG samples"
@@ -825,13 +833,27 @@ def _ppg_hrv25(alias: str, t: np.ndarray, x: np.ndarray, valid: np.ndarray,
     if len(t) < 2 or t[-1] - t[0] < 10:
         return None, "under 10 s of on-wrist 25 Hz PPG"
     acc_t, acc_xyz = acc25
-    motion_checked = len(acc_t) >= 4 * FT_FS  # foot_template ignores shorter accelerometer data
     est = FootTemplateEstimator(invert=False, axis_max=HRV25_AXIS_MAX)  # _ppg_input already turned the pulse upright
     out = est.estimate(t * 1000, x, acc_t, acc_xyz)
-    bt = np.asarray(out["beats_ms"], float) / 1000
     good = np.asarray(out["quality"], float) >= 0.5
     if good.sum() < 6:
         return None, f"foot_template kept {int(good.sum())} beats"
+    return _Beats25(t=np.asarray(out["beats_ms"], float) / 1000, good=good, t_first=t_first, t_last=t_last,
+                    fs_hz=(len(t) - 1) / (t[-1] - t[0]),
+                    motion_checked=len(acc_t) >= 4 * FT_FS,  # foot_template ignores shorter accelerometer data
+                    lost_samples=int(est.debug.get("n_drops", 0))), None
+
+
+def _ppg_hrv25(alias: str, t: np.ndarray, x: np.ndarray, valid: np.ndarray,
+               acc25: tuple[np.ndarray, np.ndarray]) -> tuple[dict | None, str | None]:
+    """HRV from 25 Hz PPG with foot_template. The run is cut into windows of about HRV25_WINDOW_S;
+    a window counts when enough of its expected intervals survive the estimator's own beat-shape,
+    motion and artifact checks, and HRV uses the intervals of the windows that count. Windows span
+    the whole recording, so off-wrist time counts against them."""
+    beats, why = _hrv25_beats(t, x, valid, acc25)
+    if beats is None:
+        return None, why
+    bt, good, t_first, t_last, motion_checked = beats.t, beats.good, beats.t_first, beats.t_last, beats.motion_checked
     a, e = bt[:-1], bt[1:]
     nn = (e - a) * 1000
     ok = good[:-1] & good[1:]  # rejected beats, and the placeholder after each recording gap, break intervals
@@ -889,10 +911,10 @@ def _ppg_hrv25(alias: str, t: np.ndarray, x: np.ndarray, valid: np.ndarray,
     gate = {"passed": passed, "reasons": reasons, "motion_checked": motion_checked, "method": "foot_template",
             "windows": windows, "accepted_s": _r(accepted_s, 1), "beats_kept": int(good.sum()),
             "beats_rejected": int((~good).sum()), "intervals_used": int(used.sum()),
-            "lost_samples_corrected": int(est.debug.get("n_drops", 0))}
+            "lost_samples_corrected": beats.lost_samples}
     return _estimate(vals, alias, "ppg", rel, int(used.sum()), notes,
                      {"gate": gate, "spans_s": _merge_spans(a[used], e[used]),
-                      "fs_hz": _r((len(t) - 1) / (t[-1] - t[0]))}), None
+                      "fs_hz": _r(beats.fs_hz)}), None
 
 
 # --------------------------------------------------------------------------------------------
@@ -1047,19 +1069,61 @@ def _samsung_ibi(df: pl.DataFrame, clock: _Clock, motion: _Motion) -> tuple[dict
     return _estimate(hv, "sdk_hr", "ibi", rel, n, notes, details), None
 
 
-def _ecg(df: pl.DataFrame, clock: _Clock) -> tuple[dict | None, dict | None, str | None]:
-    """(HR estimate, HRV estimate, reason when nothing could be computed)."""
+def _ecg_times(df: pl.DataFrame, clock: _Clock) -> np.ndarray:
+    """Seconds from the run start for each ECG sample, from the sample count.
+
+    The watch stamps each 10-sample bundle with about its delivery time, not its sampling time: on
+    SM-R965F the stamps ran at 215-835 Hz for the first ~12 s while the electrode settled (up to 2.8 s
+    late) and jitter ~2 ms after that, while the samples themselves are evenly spaced (501.3 Hz by the
+    watch clock). So bundles are numbered by the 8-bit ``sequence`` of their first sample (a jump is a
+    lost bundle) and a line through the earliest stamps, which latency only ever delays, maps that
+    number to the clock. Falls back to the stamps when there is no usable sequence."""
+    seq = _col(df, "sequence")
+    ts = _col(df, "timestamp_ms")
+    head = np.flatnonzero(seq >= 0)
+    if len(head) < 10 or not np.isfinite(ts[head]).all():
+        return clock.times(df)
+    k = np.r_[0, np.cumsum((np.diff(seq[head]).astype(np.int64) - 1) % 256 + 1)].astype(float)
+    size = float(np.median(np.diff(head)))
+    rows = np.arange(len(seq))
+    owner = np.maximum(np.searchsorted(head, rows, side="right") - 1, 0)
+    n = k[owner] + (rows - head[owner]) / size  # in bundles
+    y = ts[head]
+    p = np.polyfit(k, y, 1)
+    for _ in range(5):
+        early = y - np.polyval(p, k) <= np.median(y - np.polyval(p, k))
+        p = np.polyfit(k[early], y[early], 1)
+    return (np.polyval(p, n) - clock.t0_ms) / 1000
+
+
+@dataclass
+class _EcgPeaks:
+    t: np.ndarray  # R-peak times, s from the run start
+    ok: np.ndarray  # per interval: lead-on throughout, plausible and near its local median
+    lead_on_s: float
+    detected: int  # peaks NeuroKit2 found, before the edge, lead-off and height checks
+    inverted: bool
+
+
+def _ecg_peaks(df: pl.DataFrame, clock: _Clock) -> tuple[_EcgPeaks | None, str | None]:
+    """R-peaks of the Samsung ECG, or the reason there are too few."""
     import neurokit2 as nk
 
-    t = clock.times(df)
+    t = _ecg_times(df, clock)
     v = _col(df, "ecg_mv")
     lead = _col(df, "lead_off")
     ok = np.isfinite(t) & np.isfinite(v)
     t, v, lead = t[ok], v[ok], lead[ok]
     order = np.argsort(t, kind="stable")
-    t, v, on = t[order], v[order], (lead[order] == 0)
+    t, v, lead = t[order], v[order], lead[order]
     if len(t) < 2 or t[-1] - t[0] < 5:
-        return None, None, "less than 5 s of ECG"
+        return None, "less than 5 s of ECG"
+    # the watch flags lead-off (0 on, 5 off) on the first sample of each 10-sample bundle and writes -1
+    # on the other nine, which take their bundle's flag
+    head = np.flatnonzero(lead >= 0)
+    if not len(head):
+        return None, "no lead-off flags in the ECG"
+    on = lead[head[np.maximum(np.searchsorted(head, np.arange(len(lead)), side="right") - 1, 0)]] == 0
     grid = np.arange(t[0], t[-1], 1 / ECG_FS)
     sig = np.interp(grid, t, v)
     j = np.clip(np.searchsorted(t, grid), 1, len(t) - 1)
@@ -1067,7 +1131,7 @@ def _ecg(df: pl.DataFrame, clock: _Clock) -> tuple[dict | None, dict | None, str
     gon = on[near] & (np.abs(t[near] - grid) <= 0.01)
     lead_on_s = float(gon.sum() / ECG_FS)
     if lead_on_s < 5:
-        return None, None, f"only {lead_on_s:.1f} s of lead-on ECG"
+        return None, f"only {lead_on_s:.1f} s of lead-on ECG"
     sig = np.where(gon, sig, np.median(sig[gon]) if gon.any() else 0.0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1085,7 +1149,7 @@ def _ecg(df: pl.DataFrame, clock: _Clock) -> tuple[dict | None, dict | None, str
         amp = clean[peaks]
         peaks = peaks[amp >= 0.4 * np.median(amp)]
     if len(peaks) < 4:
-        return None, None, "fewer than 4 R-peaks"
+        return None, "fewer than 4 R-peaks"
     rt = grid[0] + np.array([p + _parabolic(clean, p) for p in peaks]) / ECG_FS
     a, e = rt[:-1], rt[1:]
     nn = (e - a) * 1000
@@ -1099,7 +1163,18 @@ def _ecg(df: pl.DataFrame, clock: _Clock) -> tuple[dict | None, dict | None, str
         dev[np.flatnonzero(okv)] = np.abs(nn[okv] - med) > LOCAL_DEV * med
         okv &= ~dev
     if okv.sum() < 3:
-        return None, None, "too few clean RR intervals"
+        return None, "too few clean RR intervals"
+    return _EcgPeaks(t=rt, ok=okv, lead_on_s=lead_on_s, detected=n_detected, inverted=bool(inverted)), None
+
+
+def _ecg(df: pl.DataFrame, clock: _Clock) -> tuple[dict | None, dict | None, str | None]:
+    """(HR estimate, HRV estimate, reason when nothing could be computed)."""
+    p, why = _ecg_peaks(df, clock)
+    if p is None:
+        return None, None, why
+    rt, okv, lead_on_s, inverted = p.t, p.ok, p.lead_on_s, p.inverted
+    a, e = rt[:-1], rt[1:]
+    nn = (e - a) * 1000
     rel = "reference" if lead_on_s >= ECG_REFERENCE_S else ("good" if lead_on_s >= ECG_MIN_S else "unreliable")
     base_notes = [(f"Samsung ECG_ON_DEMAND at {ECG_FS:.0f} Hz (timestamp_ms), NeuroKit2 ecg_clean + "
                    "ecg_peaks, parabolic sub-sample R-peaks; lead-off samples, peaks within 0.25 s of an edge "
@@ -1108,7 +1183,7 @@ def _ecg(df: pl.DataFrame, clock: _Clock) -> tuple[dict | None, dict | None, str
         base_notes.append(f"only {lead_on_s:.0f} s lead-on (reference needs {ECG_REFERENCE_S:.0f} s)")
     if inverted:
         base_notes.append("ECG polarity was inverted")
-    details = {"lead_on_s": _r(lead_on_s, 1), "r_peaks": int(len(peaks)), "r_peaks_detected": int(n_detected),
+    details = {"lead_on_s": _r(lead_on_s, 1), "r_peaks": int(len(rt)), "r_peaks_detected": p.detected,
                "inverted": bool(inverted),
                "nn_rejected": int((~okv).sum()), "spans_s": _merge_spans(a[okv], e[okv])}
     hr = _estimate(_r(60000 / np.median(nn[okv]), 1), "sdk_ecg", "ecg", rel, int(okv.sum()), base_notes, details)

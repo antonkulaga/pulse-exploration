@@ -214,6 +214,26 @@ def test_ecg_lead_off_period(base, tmp_path):
     assert res["metrics"]["hrv"]["chosen"]["source"] == "sdk_ecg"
 
 
+def test_ecg_stamped_on_delivery(base, tmp_path):
+    """The watch stamps ECG bundles on delivery: up to seconds late while the electrode settles, then
+    ~2 ms jitter (SM-R965F, 2026-10-26). R-peaks must follow the sample count, not the stamps."""
+    src, _, ref = base["ecg"]
+    run = clone(src, tmp_path)
+    df = read(run, "sdk_ecg")
+    ts = df["timestamp_ms"].to_numpy().astype(float)
+    bundle = np.arange(df.height) // 10
+    lag = np.interp((ts - ts[0]) / 1000, [0, 4, 8, 12], [0, 2500, 1200, 0])  # falls behind, then catches up
+    jitter = np.abs(np.random.default_rng(3).normal(0, 2, bundle.max() + 1))[bundle]
+    write(run, "sdk_ecg", df.with_columns(pl.Series("timestamp_ms", np.round(ts + lag + jitter).astype(np.int64))))
+    res = w.analyze_run(run, write=False)
+    e, r = est(res, "hrv", "sdk_ecg"), est(ref, "hrv", "sdk_ecg")
+    print(f"\nECG stamped on delivery: RMSSD {e['value']['rmssd_ms']} vs {r['value']['rmssd_ms']} with true stamps")
+    assert e["reliability"] == "reference"
+    assert abs(e["details"]["lead_on_s"] - r["details"]["lead_on_s"]) <= 0.2
+    assert e["details"]["r_peaks"] == r["details"]["r_peaks"]
+    assert abs(e["value"]["rmssd_ms"] - r["value"]["rmssd_ms"]) <= 1.0
+
+
 def test_ecg_mostly_lead_off_falls_back(base, tmp_path):
     src, _, _ = base["ecg"]
     run = clone(src, tmp_path)

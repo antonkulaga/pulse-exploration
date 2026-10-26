@@ -2,6 +2,7 @@ package io.github.antonkulaga.pulseprobe
 
 import android.content.Context
 import android.os.Handler
+import android.util.Log
 import com.samsung.android.service.health.tracking.ConnectionListener
 import com.samsung.android.service.health.tracking.HealthTracker
 import com.samsung.android.service.health.tracking.HealthTrackerException
@@ -252,6 +253,8 @@ class SamsungSource(
         private set
     override val events get() = stats.events
     private var closed = false
+    /** ECG only: whether a finger is on the key, from LEAD_OFF (0 on, 5 off, -1 inside a 10-sample bundle). */
+    private var leadOn: Boolean? = null
 
     override fun start() {
         when {
@@ -289,10 +292,22 @@ class SamsungSource(
                 }
                 out?.write("${point.timestamp},$wall,$values\n")
                 stats.add(point.timestamp)
+                if (spec.type == "ECG_ON_DEMAND") showLead(point)
             }
         } catch (e: Exception) {
             if (error.isEmpty()) error = clean("write: $e")
         }
+    }
+
+    /** ECG data arrives every ~20 ms, so the watch can tell the user at once whether the key is touched. */
+    private fun showLead(point: DataPoint) {
+        val flag = point.getValue(ValueKey.EcgSet.LEAD_OFF) ?: return
+        if (flag < 0) return
+        val on = flag == 0
+        if (on == leadOn) return
+        leadOn = on
+        Log.i(RecorderService.TAG, "ecg lead ${if (on) "on" else "off"} (lead_off=$flag)")
+        ProbeState.activity(if (on) "ECG: contact, keep still" else "ECG: touch the top key")
     }
 
     override fun onFlushCompleted() {}

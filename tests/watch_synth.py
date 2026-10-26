@@ -309,12 +309,17 @@ def make_run(root: Path, name: str, tier: str = "25hz", duration_s: float = 120.
             ecg = ecg_wave(te, r) + 0.015 * rng.standard_normal(len(te)) + 0.1 * np.sin(2 * np.pi * 0.3 * te)
             lead_off = np.where(te < a + 0.5, 5, 0)
             ecg = np.where(lead_off == 0, ecg, 0.0)
-            mse = T0_MS + np.round(te * 1000).astype(np.int64)
+            # as on SM-R965F: bundles of 10 samples share one timestamp, and only a bundle's first sample
+            # carries lead_off, sequence, ppg_green and the thresholds (the other nine read -1)
+            head = np.arange(len(te)) % 10 == 0
+            bundle_te = te[np.arange(len(te)) // 10 * 10]
+            mse = T0_MS + np.round(bundle_te * 1000).astype(np.int64)
             arrival = T0_MS + (np.floor((te - a) / 2) * 2 + a + 2.1) * 1000
             n = _write_csv(run / "sdk_ecg.csv", ["timestamp_ms", "wall_ms", "ecg_mv", "lead_off", "sequence",
                                                  "ppg_green", "max_threshold_mv", "min_threshold_mv"],
-                           [mse, _ints(arrival), np.round(ecg, 5), lead_off, np.arange(len(te)),
-                            np.full(len(te), 85000), np.full(len(te), 2.0), np.full(len(te), -2.0)])
+                           [mse, _ints(arrival), np.round(ecg, 5), np.where(head, lead_off, -1),
+                            np.where(head, np.arange(len(te)) // 10 % 256, -1), np.where(head, 85000, -1),
+                            np.where(head, 2.0, -1.0), np.where(head, -2.0, -1.0)])
             summary("all", "sdk_ecg", n, 500.0, 6, f"{ecg[0]:.4f},5,0,85000,2.0,-2.0")
             truth.ecg_s = (a + 0.5, b)
 
