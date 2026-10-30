@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "av>=19.0.2",
     "fastapi>=0.159.1",
+    "huggingface-hub>=2.3.0",
     "matplotlib>=3.11.2",
     "neurokit2>=0.2.13",
     "numpy>=2.5.4",
@@ -16,9 +17,18 @@ dependencies = [
     "python-multipart>=0.0.32",
     "scipy>=1.18.1",
     "setuptools>=81,<82",
+    "torch>=2.14.1",
     "uvicorn[standard]>=0.54.0",
     "wfdb>=4.3.1",
 ]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]  # AI-PPG Age (pulse_exploration/ppg_age.py) is a 0.4 M-parameter CNN
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [

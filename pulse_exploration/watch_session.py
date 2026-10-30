@@ -21,6 +21,9 @@ Every estimate is ``{value, source, feature, tier, reliability, n, notes, detail
   that keep at least half their expected intervals; sdk_ppg is good with >= 54 s of such windows,
   hr_raw experimental at best until it is checked against the watch ECG.
 * ``motion``, ``on_wrist``, ``skin_temp``, ``spo2`` summaries.
+* ``ppg_age`` (only in runs with sdk_ppg100, and only when the AI-PPG Age weights are already on this
+  machine): an exploratory PPG age from the averaged motion-free beat, experimental at best, never an
+  absolute age; its value carries the error band and the warning (pulse_exploration/ppg_age.py).
 
 The chosen estimate is the first one in the metric's priority order that is not unreliable (the
 first one overall when all are). Successive differences (RMSSD, pNN50) only use intervals that
@@ -58,7 +61,8 @@ from pulse_exploration.watch_raw import OFFSET, read_csv
 
 # 0.2: suspected dropped Samsung IBIs, no "good" without motion check
 # 0.3: 25 Hz PPG HRV by foot_template; Samsung IBIs cleaned of lost-sample intervals; sdk_ppg before sdk_hr
-ANALYSIS_VERSION = "watch-session-0.3"
+# 0.4: optional exploratory ppg_age metric (AI-PPG Age) for runs with sdk_ppg100
+ANALYSIS_VERSION = "watch-session-0.4"
 ANALYSIS_FILE = "analysis.json"
 CAPABILITIES_FILE = "capabilities.json"
 CAPABILITIES_SCHEMA = 1
@@ -1372,6 +1376,19 @@ def analyze_run(run_dir: str | Path, write: bool = True) -> dict:
     metrics = {"hr": _metric(hr_est, HR_PRIORITY, hr_skip), "hrv": _metric(hrv_est, HRV_PRIORITY, hrv_skip)}
     for k, (est, sk) in other.items():
         metrics[k] = _metric(est, (est[0]["source"],) if est else (), sk)
+    if "sdk_ppg100" in tables:  # exploratory; analysis never downloads the weights
+        from pulse_exploration import ppg_age
+
+        age: tuple[list, list] = ([], [])
+        if res := _safe(age[1], "sdk_ppg100", ppg_age.watch_estimate, "sdk_ppg100", tables["sdk_ppg100"], clock,
+                        motion):
+            keep(age, "sdk_ppg100", res[0], res[1])
+        metrics["ppg_age"] = _metric(age[0], ("sdk_ppg100",), age[1])
+        if pa := metrics["ppg_age"]["chosen"]:
+            v = pa["value"]
+            _warn(warns, "ppg_age_exploratory", f"PPG age {v['ppg_age_y']} y (band {v['band_y'][0]}-"
+                  f"{v['band_y'][1]} y, {v['beats_averaged']} beats, {pa['reliability']}) is exploratory, not an "
+                  "absolute age: a within-person trend at best", "info")
 
     # warnings
     if not tables:
