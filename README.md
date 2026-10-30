@@ -195,8 +195,8 @@ age) read other systems over months to years. Ways to combine them, from cheapes
 
 The [PPG health and aging report](reports/PPG%20health%20and%20aging%20measures.md) and its
 [aging research notes](research_notes/PPG%20health%20and%20aging%20measures/aging_vascular.md) hold
-the evidence. The [PPG Aging Roadmap](https://claude.ai/artifact/3J2bE9UCWxAzkoqtrHYfCw) (private
-page) lays out the build order and open decisions.
+the evidence. The [PPG Health & Aging Roadmap](https://claude.ai/artifact/3J2bE9UCWxAzkoqtrHYfCw) (private
+page) has the health measures, the aging clocks, the build order and the open decisions.
 
 ## How the pieces fit
 
