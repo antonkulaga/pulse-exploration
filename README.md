@@ -5,6 +5,10 @@ Watch (developed on a Watch6 Classic, SM-R965F) and a phone camera. A laptop ser
 recordings. It is not a medical device and was built without regulatory work. Recordings are
 personal health data and stay out of git.
 
+The project started from one watch, the author's own, to keep things simple. The longer-term aim is
+aging biomarkers: pulse-based measures read with existing PPG age models and, later, combined with
+methylation, blood and photo clocks. See [Aging clocks](#aging-clocks-where-this-is-heading) below.
+
 The guiding question is what can be measured **zero-shot**, without labelled training data of our
 own. Every feature is tagged by what the user has to set up:
 
@@ -16,7 +20,7 @@ The apps use the SDK when the watch allows it and fall back to tier `25hz` other
 
 ## What was done
 
-Work ran from 2026-10-21 to 2026-10-26. Each piece has a document with methods, full tables and
+Work ran from 2026-10-21 to 2026-10-27. Each piece has a document with methods, full tables and
 limitations; the numbers below are the headlines.
 
 ### 1. Raw signals from the watch without the Samsung SDK
@@ -128,6 +132,72 @@ See [watch/phone/README.md](watch/phone/README.md).
 - [docs/cgm-track-plan.md](docs/cgm-track-plan.md): a plan, not yet built, for an N-of-1 study pairing
   overnight watch signals with a continuous glucose monitor to look for nocturnal lows.
 
+## Aging clocks: where this is heading
+
+The plan is to use existing PPG age models rather than train a new one. Good PPG clocks need
+population-scale data: Apple's PpgAge reached a 2.4-year error with 213,593 people and 30-day
+averages. A prototype with a few users cannot match that, but it can feed such models clean,
+repeated measurements of the same person.
+
+**What this repository already gives an aging clock**
+
+- **Beat timing.** Nightly resting heart rate and HRV have the strongest outcome evidence of any
+  wrist measure (resting heart rate: all-cause mortality RR 1.09 per 10 bpm across 46 cohorts). The
+  25 Hz HRV here is within about 3 ms of ECG.
+- **Pulse shape.** Averaged beats from the 25 Hz stream keep crest time and the b/a ratio
+  (`benchmarks/morph25`). The SDK's 30 s spot checks add 100 Hz PPG and an ECG for pulse arrival time.
+
+**Existing models to use**
+
+| Model | What it reads | Error | Outcome evidence | Access |
+|---|---|---|---|---|
+| AI-PPG Age (Nie et al., *Communications Medicine* 2025) | one averaged finger beat, 100 samples | 7.6 y in UK Biobank; 11.5 y on other data | gap above 9 y: death HR about 2.5 | MIT, [weights on Hugging Face](https://huggingface.co/Ngks03/PPG-VascularAge) |
+| Pulse-PPG, PaPaGei, AnyPPG | embeddings of wrist, finger or phone PPG | 6–10 y with an age probe | none yet | Pulse-PPG MIT; the others need permission |
+| Apple PpgAge, OPPO heart age | wrist PPG, 30-day averages or repeated 30 s checks | 2.4 y and 5 y | PpgAge gap predicts heart disease | closed; their methods shape our protocol |
+
+AI-PPG Age is the only open PPG clock with outcome evidence, so it comes first. It runs in
+[`pulse_exploration/ppg_age.py`](pulse_exploration/ppg_age.py); details in
+[docs/ppg-age.md](docs/ppg-age.md).
+
+- The weights are downloaded once from a pinned commit and checked by SHA-256. The network is
+  re-implemented in `net1d.py`, so no downloaded code runs.
+- Beats are averaged from motion-free intervals into the model's 100-sample, foot-to-foot input.
+- Every value carries its error band, a warning and the number of beats averaged. It is marked
+  unreliable with fewer than 10 motion-free intervals, beats that match their average poorly, or a
+  shapeless, near-sinusoid average beat.
+- The watch analysis adds it as an optional `ppg_age` metric for runs with 100 Hz PPG. Fingertip
+  camera traces work through the command line.
+
+On the first 30 s recording the wrist moved for 26 of 30 s. The result, 68.8 y, was marked
+unreliable and says nothing about age; still recordings are the next step.
+
+**How the numbers will be used**
+
+- A PPG age from these devices is a within-person trend, always shown with its error band and a
+  warning, never compared with calendar age.
+- Measurements follow the OPPO protocol: about 10 still 30 s spot checks per quarter at a fixed
+  posture, some paired with a fingertip camera capture, which is closer to AI-PPG Age's finger
+  training data.
+- A change counts only when it is larger than the spread of checks within a quarter.
+
+**Later: combining with other clocks**
+
+Pulse measures read the vascular and autonomic systems and change within days. Methylation clocks
+(GrimAge2, DunedinPACE), blood clocks (PhenoAge, proteomic age) and photo clocks (FaceAge, retinal
+age) read other systems over months to years. Ways to combine them, from cheapest to hardest:
+
+- show each clock's age gap side by side, grouped by body system;
+- fit them together against death and disease outcomes, for which UK Biobank holds finger pulse waves,
+  accelerometry, blood chemistry, proteins and retinal photos;
+- give cohorts that have methylation but no wearables a methylation or blood surrogate of the pulse-age
+  gap;
+- use yearly molecular clocks as anchors and the watch to track the months between them.
+
+The [PPG health and aging report](reports/PPG%20health%20and%20aging%20measures.md) and its
+[aging research notes](research_notes/PPG%20health%20and%20aging%20measures/aging_vascular.md) hold
+the evidence. The [PPG Aging Roadmap](https://claude.ai/artifact/3J2bE9UCWxAzkoqtrHYfCw) (private
+page) lays out the build order and open decisions.
+
 ## How the pieces fit
 
 ```text
@@ -150,6 +220,7 @@ the priority is ECG, then SDK 25 Hz PPG, cleaned Samsung IBIs, 100 Hz PPG, and `
 | `pulse_exploration/pages_api.py`, `static/` | phone web pages |
 | `pulse_exploration/hrv/` | beat-timing methods (`cand_*`), benchmark harness (`bench.py`), AF screen |
 | `pulse_exploration/galaxyppg.py` | GalaxyPPG loader, ECG reference beats, watch-to-strap clock alignment |
+| `pulse_exploration/ppg_age.py`, `net1d.py` | exploratory PPG age with AI-PPG Age: beat averaging, gates, model |
 | `benchmarks/` | `hrv25`, `morph25`, `af25`, `afdb`, `watch_ecg` (one `run.py` each) |
 | `watch/probe/`, `watch/phone/` | Wear OS recorder app and phone camera app (Kotlin, Gradle) |
 | `docs/`, `reports/`, `research_notes/` | findings, research report and its notes |
@@ -199,6 +270,16 @@ uv run python benchmarks/watch_ecg/run.py            # own watch: 25 Hz beats vs
 
 Results go to `data/benchmarks/<name>/`.
 
+### PPG age
+
+`uv sync` installs CPU-only torch, which is enough for the 0.4 M-parameter model. The run analysis
+never downloads the weights, so fetch them once:
+
+```bash
+uv run python -m pulse_exploration.ppg_age --download
+uv run python -m pulse_exploration.ppg_age data/runs/<run>   # or a data/camera/<id>-finger-trace directory
+```
+
 ## Data and licences
 
 - `data/` is gitignored: watch runs, camera traces, downloaded datasets, caches and benchmark output.
@@ -220,4 +301,5 @@ Results go to `data/benchmarks/<name>/`.
     baselines);
   - the AF screen on our own nights, with ECG confirmation;
   - 30-second SDK spot checks for pulse-shape and vascular trends;
-  - embedding-based aging trends, labelled as exploratory.
+  - PPG age from existing models on repeated still spot checks, then embedding-based aging trends,
+    both labelled as exploratory.
