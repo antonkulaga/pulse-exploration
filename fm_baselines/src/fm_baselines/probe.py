@@ -1,19 +1,26 @@
-"""Linear probes on subject-level mean embeddings, on kron-ppg's person-level split.
+"""From embeddings to per-person trait scores, and one evaluation for every model.
 
-For each embedding set (model x rate) trained on ``vitaldb``:
+**Scores** (:func:`fit_scores`). A person's feature is the mean of their window embeddings. For each trait in
+:mod:`fm_baselines.labels`, a linear probe is trained on VitalDB *train* people:
 
-* **age**: ridge regression, alpha chosen on validation MAE, fitted on train. Reported per person: MAE and
-  Pearson r on test, against predicting the training median; then on the external sets (BIDMC, GalaxyPPG)
-  with the VitalDB fit unchanged.
-* **age gap**: the prediction minus its validation-fitted line on age (the bias correction kron-ppg uses),
-  and the AUC of that gap for each flag on test, beside age's own AUC. This is the outcome check: a clock
-  is worth having only if its gap carries risk.
-* **flags** (``preop_htn``, ``preop_dm``, ``asa_ge3``, ``sex_male``): logistic regression, C chosen on
-  validation AUC, with three feature sets: ``age+sex`` alone, the embedding alone, and embedding+age+sex.
-  The paired bootstrap of (embedding+age+sex) - (age+sex) on test says whether PPG adds anything.
+- ridge for numbers, logistic regression for flags;
+- the penalty is chosen on *validation* people.
 
-A feature set named ``hr`` (mean and SD of each window's heart rate and periodicity) is the no-model
-baseline, built from the same windows.
+Its output on everyone is the PPG score. The ``hr`` feature set (mean and SD of each window's heart rate and
+periodicity) is the no-model baseline.
+
+**Evaluation** (:func:`evaluate`). The same function judges any table of scores: frozen foundation models,
+frozen KronLSTM encoders, and kron-ppg's own trained heads. It never looks at train people, so a head that
+overfits its training people is judged fairly.
+
+- **age**: test MAE and r against the validation median. The age gap is the prediction minus its line on
+  age fitted on validation people. The gap's AUC is reported for each flag on test people, beside age's own.
+- **every other trait**: does the PPG score say more than age and sex?
+  - Two models are fitted on validation people and scored on test people: age+sex, and age+sex+score.
+    They are logistic for flags (AUC) and linear for numbers (R²).
+  - The paired bootstrap of the difference has a 95% interval. An interval above 0 means the PPG adds
+    something.
+  - The score alone is reported too (AUC or r).
 """
 from __future__ import annotations
 
@@ -22,37 +29,21 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
-FLAGS = {
-    "preop_htn": lambda s: _num(s, "preop_htn") >= 1,
-    "preop_dm": lambda s: _num(s, "preop_dm") >= 1,
-    "asa_ge3": lambda s: _num(s, "asa") >= 3,
-    "sex_male": lambda s: _sex(s),
-}
+from .labels import BINARY, REGRESSION, TRAITS
+
 ALPHAS = np.logspace(-1, 5, 13)
 CS = np.logspace(-4, 1, 11)
 BOOT = 1000
+MIN_POSITIVES = 20
 
 
-def _num(s: pl.DataFrame, col: str) -> np.ndarray:
-    if col not in s.columns:
-        return np.full(len(s), np.nan)
-    return s.get_column(col).cast(pl.Float64, strict=False).fill_null(np.nan).to_numpy()
-
-
-def _sex(s: pl.DataFrame) -> np.ndarray:
-    if "sex" not in s.columns:
-        return np.full(len(s), np.nan)
-    m = s.get_column("sex").cast(pl.String).str.to_lowercase()
-    return np.where(m.is_in(["m", "male"]).to_numpy(), 1.0, np.where(m.is_in(["f", "female"]).to_numpy(), 0.0,
-                                                                       np.nan))
-
-
-def subject_table(windows: pl.DataFrame, subjects: pl.DataFrame, features: str) -> tuple[pl.DataFrame, np.ndarray]:
-    """One row per subject (key, split, age, flags as 0/1/NaN, n windows) and its feature matrix."""
+# ---- features ------------------------------------------------------------------------------------
+def subject_features(windows: pl.DataFrame, features: str = "emb") -> tuple[pl.DataFrame, np.ndarray]:
+    """One row per person (``key``, ``split``, ``n_windows``) and the mean of their windows' features."""
     keys = windows.get_column("key").to_numpy()
     uniq, first, inv, counts = np.unique(keys, return_index=True, return_inverse=True, return_counts=True)
     if features == "hr":
@@ -68,187 +59,287 @@ def subject_table(windows: pl.DataFrame, subjects: pl.DataFrame, features: str) 
         x = np.zeros((len(uniq), emb.shape[1]))
         np.add.at(x, inv, emb)
         x /= counts[:, None]
-    agg = pl.DataFrame({"key": uniq, "split": windows.get_column("split").to_numpy()[first],
-                        "n_windows": counts})
-    table = agg.join(subjects.drop("subject"), on="key", how="left", maintain_order="left")
-    age = _num(table, "age")
-    flags = {name: f(table).astype(np.float64) for name, f in FLAGS.items()}
-    table = table.select("key", "split", "n_windows").with_columns(
-        pl.Series("age", age), *[pl.Series(k, v) for k, v in flags.items()])
+    table = pl.DataFrame({"key": uniq.astype(str), "split": windows.get_column("split").to_numpy()[first],
+                          "n_windows": counts})
     return table, x
 
 
+# ---- stage 1: scores -----------------------------------------------------------------------------
 def _auc(y: np.ndarray, s: np.ndarray) -> float:
     ok = np.isfinite(y) & np.isfinite(s)
-    y, s = y[ok], s[ok]
-    if len(np.unique(y)) < 2:
+    if len(np.unique(y[ok])) < 2:
         return float("nan")
-    return float(roc_auc_score(y, s))
+    return float(roc_auc_score(y[ok], s[ok]))
 
 
-def _boot_ci(y: np.ndarray, *scores: np.ndarray, seed: int = 0) -> list[float]:
-    """95% bootstrap interval of AUC(scores[0]), or of AUC(scores[0]) - AUC(scores[1]) when two are given."""
+def fit_scores(table: pl.DataFrame, x: np.ndarray, labels: pl.DataFrame,
+               traits: tuple[str, ...] = TRAITS) -> tuple[pl.DataFrame, dict, dict]:
+    """PPG scores for every person and trait, the chosen penalties, and the fitted (scaler, model) per trait."""
+    lab = table.select("key").join(labels, on="key", how="left", maintain_order="left")
+    split = table.get_column("split").to_numpy()
+    scaler = StandardScaler().fit(x[split == "train"])
+    z = scaler.transform(x)
+    scores, chosen, models = {}, {}, {}
+    for t in traits:
+        y = lab.get_column(t).to_numpy() if t in lab.columns else np.full(len(lab), np.nan)
+        ok = np.isfinite(y)
+        tr, va = ok & (split == "train"), ok & (split == "val")
+        if tr.sum() < 50 or va.sum() < 20:
+            continue
+        if t in BINARY:
+            if min(y[tr].sum(), (1 - y[tr]).sum()) < MIN_POSITIVES or len(np.unique(y[va])) < 2:
+                continue
+            best = None
+            for c in CS:
+                m = LogisticRegression(C=c, max_iter=5000).fit(z[tr], y[tr])
+                auc = _auc(y[va], m.decision_function(z[va]))
+                if best is None or auc > best[0]:
+                    best = (auc, c, m)
+            scores[t], chosen[t], models[t] = best[2].decision_function(z), {"C": float(best[1])}, best[2]
+        else:
+            best = None
+            for a in ALPHAS:
+                m = Ridge(alpha=a).fit(z[tr], y[tr])
+                mae = float(np.mean(np.abs(m.predict(z[va]) - y[va])))
+                if best is None or mae < best[0]:
+                    best = (mae, a, m)
+            scores[t], chosen[t], models[t] = best[2].predict(z), {"alpha": float(best[1])}, best[2]
+    out = table.select("key", "split", "n_windows").with_columns(
+        *[pl.Series(f"score_{t}", v, dtype=pl.Float64) for t, v in scores.items()])
+    return out, chosen, {t: (scaler, m) for t, m in models.items()}
+
+
+def apply_scores(table: pl.DataFrame, x: np.ndarray, models: dict) -> pl.DataFrame:
+    """Scores of people outside VitalDB with the VitalDB fits unchanged."""
+    cols = []
+    for t, (scaler, m) in models.items():
+        z = scaler.transform(x)
+        cols.append(pl.Series(f"score_{t}", m.decision_function(z) if t in BINARY else m.predict(z),
+                              dtype=pl.Float64))
+    return table.select("key", "split", "n_windows").with_columns(*cols)
+
+
+# ---- stage 2: evaluation -------------------------------------------------------------------------
+def _boot(fn, n: int, seed: int = 0) -> list[float]:
     rng = np.random.default_rng(seed)
-    ok = np.isfinite(y) & np.all([np.isfinite(s) for s in scores], axis=0)
-    y = y[ok]
-    scores = [s[ok] for s in scores]
     vals = []
     for _ in range(BOOT):
-        i = rng.integers(0, len(y), len(y))
-        if len(np.unique(y[i])) < 2:
-            continue
-        a = roc_auc_score(y[i], scores[0][i])
-        vals.append(a - roc_auc_score(y[i], scores[1][i]) if len(scores) > 1 else a)
+        v = fn(rng.integers(0, n, n))
+        if np.isfinite(v):
+            vals.append(v)
     return [round(float(np.percentile(vals, 2.5)), 4), round(float(np.percentile(vals, 97.5)), 4)] if vals else []
 
 
-def _fit_ridge(x, y, tr, va):
-    best = None
-    for a in ALPHAS:
-        m = Ridge(alpha=a).fit(x[tr], y[tr])
-        mae = float(np.mean(np.abs(m.predict(x[va]) - y[va])))
-        if best is None or mae < best[0]:
-            best = (mae, a, m)
-    return best[2], float(best[1])
-
-
-def _fit_logistic(x, y, tr, va):
-    best = None
-    for c in CS:
-        m = LogisticRegression(C=c, max_iter=5000).fit(x[tr], y[tr])
-        auc = _auc(y[va], m.decision_function(x[va]))
-        if best is None or auc > best[0]:
-            best = (auc, c, m)
-    return best[2], float(best[1])
+def _r2(y: np.ndarray, p: np.ndarray) -> float:
+    ss = np.sum((y - y.mean()) ** 2)
+    return float(1 - np.sum((y - p) ** 2) / ss) if ss > 0 else float("nan")
 
 
 def _r(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.corrcoef(a, b)[0, 1]) if len(a) > 2 else float("nan")
+    ok = np.isfinite(a) & np.isfinite(b)
+    return float(np.corrcoef(a[ok], b[ok])[0, 1]) if ok.sum() > 2 else float("nan")
 
 
-def probe(train: tuple[pl.DataFrame, np.ndarray], externals: dict[str, tuple[pl.DataFrame, np.ndarray]]) -> tuple[dict, pl.DataFrame]:
-    table, x = train
-    split = table.get_column("split").to_numpy()
-    age = table.get_column("age").to_numpy()
-    scaler = StandardScaler().fit(x[split == "train"])
-    z = scaler.transform(x)
-    out: dict = {"subjects": {s: int((split == s).sum()) for s in ("train", "val", "test")}}
+def evaluate(scores: pl.DataFrame, labels: pl.DataFrame) -> dict:
+    """Test-set metrics of every ``score_<trait>`` column; fits only on validation people."""
+    df = scores.join(labels, on="key", how="left", maintain_order="left")
+    split = df.get_column("split").to_numpy()
+    age = df.get_column("age").to_numpy()
+    male = df.get_column("sex_male").to_numpy()
+    va_all, te_all = split == "val", split == "test"
+    out: dict = {"people": {"val": int(va_all.sum()), "test": int(te_all.sum())}, "traits": {}}
 
-    # age
-    has = np.isfinite(age)
-    tr, va, te = (has & (split == "train")), (has & (split == "val")), (has & (split == "test"))
-    ridge, alpha = _fit_ridge(z, age, tr, va)
-    pred = ridge.predict(z)
-    median = float(np.median(age[tr]))
-    slope, intercept = np.polyfit(age[va], pred[va], 1)
-    gap = pred - (intercept + slope * age)
-    out["age"] = {
-        "alpha": alpha,
-        **{f"{name}_mae": round(float(np.mean(np.abs(pred[m] - age[m]))), 3) for name, m in
-           (("train", tr), ("val", va), ("test", te))},
-        "test_r": round(_r(pred[te], age[te]), 4),
-        "test_mae_median_baseline": round(float(np.mean(np.abs(median - age[te]))), 3),
-        "gap_bias_fit_on_val": {"slope": round(float(slope), 4), "intercept": round(float(intercept), 3)},
-        "test_gap_r_with_age": round(_r(gap[te], age[te]), 4),
-    }
-    preds = {"pred_age": pred, "age_gap": gap}
+    if "score_age" in df.columns:
+        pred = df.get_column("score_age").to_numpy()
+        va, te = va_all & np.isfinite(age), te_all & np.isfinite(age)
+        median = float(np.median(age[va]))
+        slope, intercept = np.polyfit(age[va], pred[va], 1)
+        gap = pred - (intercept + slope * age)
+        out["age"] = {
+            "test_people": int(te.sum()),
+            "test_mae": round(float(np.mean(np.abs(pred[te] - age[te]))), 3),
+            "test_r": round(_r(pred[te], age[te]), 4),
+            "test_mae_median_baseline": round(float(np.mean(np.abs(median - age[te]))), 3),
+            "val_mae": round(float(np.mean(np.abs(pred[va] - age[va]))), 3),
+            "gap_line_on_val": {"slope": round(float(slope), 4), "intercept": round(float(intercept), 3)},
+            "test_gap_r_with_age": round(_r(gap[te], age[te]), 4),
+            "gap_auc": {},
+        }
+        for t in BINARY:
+            if t == "sex_male" or t not in df.columns:
+                continue
+            y = df.get_column(t).to_numpy()
+            m = te & np.isfinite(y)
+            if m.sum() and len(np.unique(y[m])) == 2:
+                yy, gg = y[m], gap[m]
+                out["age"]["gap_auc"][t] = {
+                    "auc_gap": round(_auc(yy, gg), 4),
+                    "ci": _boot(lambda i: _auc(yy[i], gg[i]), len(yy)),
+                    "auc_age": round(_auc(yy, age[m]), 4), "positives": int(yy.sum()), "n": int(m.sum())}
 
-    # flags: age+sex, embedding, embedding+age+sex; and the age gap's own AUC
-    sex = table.get_column("sex_male").to_numpy()
-    out["flags"] = {}
-    for flag in FLAGS:
-        y = table.get_column(flag).to_numpy()
-        ok = np.isfinite(y) & has & (np.isfinite(sex) | (flag == "sex_male"))
-        if ok.sum() == 0 or len(np.unique(y[ok & (split == "train")])) < 2:
+    for t in TRAITS:
+        col = f"score_{t}"
+        if t == "age" or col not in df.columns or t not in df.columns:
             continue
-        base = np.column_stack([age] if flag == "sex_male" else [age, np.nan_to_num(sex, nan=0.5)])
-        base = np.nan_to_num((base - base[tr].mean(0)) / base[tr].std(0))  # rows without age are never scored
-        res = {"n_test": int((ok & (split == "test")).sum()), "positives_test": int(np.nansum(y[ok & (split == "test")]))}
-        scores = {}
-        for name, feats in (("age_sex", base), ("ppg", z), ("ppg_age_sex", np.column_stack([z, base]))):
-            m, c = _fit_logistic(feats, y, ok & (split == "train"), ok & (split == "val"))
-            scores[name] = np.where(ok, m.decision_function(feats), np.nan)
-            t = ok & (split == "test")
-            res[name] = {"C": c, "test_auc": round(_auc(y[t], scores[name][t]), 4),
-                         "test_auc_ci": _boot_ci(y[t], scores[name][t])}
-        t = ok & (split == "test")
-        res["delta_ppg_age_sex_minus_age_sex"] = {
-            "test": round(res["ppg_age_sex"]["test_auc"] - res["age_sex"]["test_auc"], 4),
-            "ci": _boot_ci(y[t], scores["ppg_age_sex"][t], scores["age_sex"][t])}
-        if flag != "sex_male":
-            res["age_alone_test_auc"] = round(_auc(y[t], age[t]), 4)
-            res["age_gap_test_auc"] = round(_auc(y[t], gap[t]), 4)
-            res["age_gap_test_auc_ci"] = _boot_ci(y[t], gap[t])
-        out["flags"][flag] = res
-        preds[f"p_{flag}"] = scores["ppg_age_sex"]
+        y = df.get_column(t).to_numpy()
+        s = df.get_column(col).to_numpy()
+        base_cols = [age] if t == "sex_male" else [age, male]
+        base = np.column_stack(base_cols)
+        ok = np.isfinite(y) & np.isfinite(s) & np.all(np.isfinite(base), axis=1)
+        va, te = ok & va_all, ok & te_all
+        if va.sum() < 20 or te.sum() < 20:
+            continue
+        mu, sd = base[va].mean(0), base[va].std(0) + 1e-9
+        b = (base - mu) / sd
+        sz = (s - s[va].mean()) / (s[va].std() + 1e-9)
+        full = np.column_stack([b, sz])
+        res: dict = {"test_n": int(te.sum())}
+        if t in BINARY:
+            if len(np.unique(y[va])) < 2 or len(np.unique(y[te])) < 2:
+                continue
+            res["test_positives"] = int(y[te].sum())
+            m0 = LogisticRegression(C=1.0, max_iter=5000).fit(b[va], y[va])
+            m1 = LogisticRegression(C=1.0, max_iter=5000).fit(full[va], y[va])
+            p0, p1 = m0.decision_function(b[te]), m1.decision_function(full[te])
+            yy, ss = y[te], s[te]
+            res.update(
+                auc_ppg=round(_auc(yy, ss), 4), auc_ppg_ci=_boot(lambda i: _auc(yy[i], ss[i]), len(yy)),
+                auc_base=round(_auc(yy, p0), 4), auc_base_plus_ppg=round(_auc(yy, p1), 4),
+                delta=round(_auc(yy, p1) - _auc(yy, p0), 4),
+                delta_ci=_boot(lambda i: _auc(yy[i], p1[i]) - _auc(yy[i], p0[i]), len(yy)),
+                ppg_weight=round(float(m1.coef_[0, -1]), 4))
+        else:
+            m0 = LinearRegression().fit(b[va], y[va])
+            m1 = LinearRegression().fit(full[va], y[va])
+            p0, p1 = m0.predict(b[te]), m1.predict(full[te])
+            yy, ss = y[te], s[te]
+            res.update(
+                r_ppg=round(_r(yy, ss), 4), mae_ppg=round(float(np.mean(np.abs(yy - ss))), 3),
+                r2_base=round(_r2(yy, p0), 4), r2_base_plus_ppg=round(_r2(yy, p1), 4),
+                delta=round(_r2(yy, p1) - _r2(yy, p0), 4),
+                delta_ci=_boot(lambda i: _r2(yy[i], p1[i]) - _r2(yy[i], p0[i]), len(yy)))
+        out["traits"][t] = res
+    return out
 
-    # external sets with the VitalDB fit unchanged
-    out["external"] = {}
-    sex_model = None
-    if "sex_male" in out["flags"]:
-        y = table.get_column("sex_male").to_numpy()
-        ok = np.isfinite(y)
-        sex_model, _ = _fit_logistic(z, y, ok & (split == "train"), ok & (split == "val"))
-    for name, (etable, ex) in externals.items():
-        ez = scaler.transform(ex)
-        eage = etable.get_column("age").to_numpy()
-        ep = ridge.predict(ez)
-        m = np.isfinite(eage)
-        res = {"subjects": int(len(etable)), "with_age": int(m.sum())}
+
+def evaluate_external(scores: pl.DataFrame, labels: pl.DataFrame) -> dict:
+    """Age and sex on another source, with the VitalDB fits unchanged."""
+    df = scores.join(labels, on="key", how="left", maintain_order="left")
+    out = {"people": len(df)}
+    if "score_age" in df.columns:
+        age, pred = df.get_column("age").to_numpy(), df.get_column("score_age").to_numpy()
+        m = np.isfinite(age)
         if m.sum():
-            res.update(mae=round(float(np.mean(np.abs(ep[m] - eage[m]))), 3), r=round(_r(ep[m], eage[m]), 4),
-                       mae_median_baseline=round(float(np.mean(np.abs(median - eage[m]))), 3),
-                       mean_pred=round(float(ep[m].mean()), 2), mean_age=round(float(eage[m].mean()), 2))
-        esex = etable.get_column("sex_male").to_numpy()
-        if sex_model is not None and np.isfinite(esex).sum():
-            res["sex_auc"] = round(_auc(esex, sex_model.decision_function(ez)), 4)
-        out["external"][name] = res
-
-    predictions = table.with_columns(*[pl.Series(k, v) for k, v in preds.items()])
-    return out, predictions
+            out.update(with_age=int(m.sum()), mae=round(float(np.mean(np.abs(pred[m] - age[m]))), 3),
+                       r=round(_r(pred[m], age[m]), 4), mean_pred=round(float(pred[m].mean()), 2),
+                       mean_age=round(float(age[m].mean()), 2))
+    if "score_sex_male" in df.columns:
+        out["sex_auc"] = round(_auc(df.get_column("sex_male").to_numpy(), df.get_column("score_sex_male").to_numpy()), 4)
+    return out
 
 
-def run(emb_dir: Path, train: str, externals: list[str], out: Path, features: str = "emb") -> dict:
-    """``train`` and ``externals`` are file stems in ``emb_dir`` such as ``vitaldb-fs25-w30s``."""
+# ---- runs over folders ---------------------------------------------------------------------------
+def probe_dir(emb_dir: Path, train: str, externals: list[str], out: Path, cases: Path | None,
+              features: str = "emb", name: str | None = None) -> dict:
+    """Stage 1 + 2 for one embedding set: ``<emb_dir>/<train>.parquet`` and its external sets."""
+    from .labels import label_table
+
     def load(stem: str):
         windows = pl.read_parquet(emb_dir / f"{stem}.parquet")
-        subjects = pl.read_parquet(emb_dir / f"{stem}.subjects.parquet")
-        return subject_table(windows, subjects, features)
+        labels = label_table(pl.read_parquet(emb_dir / f"{stem}.subjects.parquet"), cases)
+        table, x = subject_features(windows, features)
+        return table, x, labels
 
-    metrics, predictions = probe(load(train), {s: load(s) for s in externals if (emb_dir / f"{s}.parquet").exists()})
-    metrics = {"model": emb_dir.name if features == "emb" else "hr", "train": train, **metrics}
+    table, x, labels = load(train)
+    scores, chosen, models = fit_scores(table, x, labels)
+    metrics = {"model": name or emb_dir.name, "train": train, "penalties": chosen, **evaluate(scores, labels),
+               "external": {}}
+    all_scores = [scores]
+    for stem in externals:
+        if (emb_dir / f"{stem}.parquet").exists():
+            et, ex, el = load(stem)
+            es = apply_scores(et, ex, {t: models[t] for t in ("age", "sex_male") if t in models})
+            metrics["external"][stem] = evaluate_external(es, el)
+            all_scores.append(es.with_columns(pl.lit("external").alias("split")))
     out.mkdir(parents=True, exist_ok=True)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    predictions.write_parquet(out / "predictions.parquet")
+    pl.concat(all_scores, how="diagonal").write_parquet(out / "scores.parquet")
     return metrics
 
 
+def kron_head_scores(run: Path) -> pl.DataFrame:
+    """kron-ppg's own predictions (a ``traits`` or ``clock`` run) as a score table keyed like ours."""
+    if (run / "predictions.parquet").exists():
+        p = pl.read_parquet(run / "predictions.parquet")
+    else:
+        p = pl.read_csv(run / "predictions.csv", schema_overrides={"subject": pl.String})
+    p = p.rename({"subject": "key"}).with_columns(pl.col("key").cast(pl.String))
+    if "predicted" in p.columns:  # an age clock
+        cols = [pl.col("predicted").cast(pl.Float64).alias("score_age")]
+    else:
+        cols = [pl.col(c).cast(pl.Float64).alias("score_" + c.removesuffix("_predicted"))
+                for c in p.columns if c.endswith("_predicted")]
+    n = pl.col("windows") if "windows" in p.columns else pl.lit(None, dtype=pl.Int64)
+    return p.select("key", "split", n.alias("n_windows"), *cols).filter(pl.col("split").is_in(["val", "test"]))
+
+
+def kron_head_eval(run: Path, labels: pl.DataFrame, out: Path) -> dict:
+    scores = kron_head_scores(run)
+    metrics = {"model": f"kron-head:{run.name}", "train": "vitaldb-fs25-w30s", **evaluate(scores, labels)}
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    scores.write_parquet(out / "scores.parquet")
+    return metrics
+
+
+# ---- summary -------------------------------------------------------------------------------------
+def _fmt_delta(r: dict) -> str:
+    ci = r.get("delta_ci") or [float("nan")] * 2
+    mark = " **" if ci and ci[0] > 0 else ""
+    return f"{r['delta']:+.3f} [{ci[0]:+.3f}, {ci[1]:+.3f}]{mark}"
+
+
 def summarize(results: Path) -> str:
-    """A markdown table over every ``<results>/<model>/<train>/metrics.json``."""
-    rows = []
-    for f in sorted(results.glob("*/*/metrics.json")):
-        m = json.loads(f.read_text())
-        a = m["age"]
-        fl = m.get("flags", {})
+    """Markdown tables over every ``<results>/<model>/<train>/metrics.json``."""
+    runs = [json.loads(f.read_text()) for f in sorted(results.glob("*/*/metrics.json"))]
+    runs = [m for m in runs if "traits" in m]
+    lines = ["## Age", "",
+             "| model | rate | test MAE (median baseline) | test r | BIDMC MAE / r | GalaxyPPG mean predicted (true 20–29) |",
+             "|---|---|---|---|---|---|"]
+    for m in runs:
+        a = m.get("age")
+        if not a:
+            continue
         ext = m.get("external", {})
         bidmc = next((v for k, v in ext.items() if k.startswith("bidmc")), {})
-        galaxy = next((v for k, v in ext.items() if k.startswith("galaxyppg")), {})
-
-        def cell(flag, key):
-            v = fl.get(flag, {})
-            if key == "gap":
-                return f"{v.get('age_gap_test_auc', float('nan')):.2f}" if v else "–"
-            d = v.get("delta_ppg_age_sex_minus_age_sex", {})
-            ci = d.get("ci") or [float("nan")] * 2
-            return f"{v['ppg']['test_auc']:.2f} / {d.get('test', float('nan')):+.3f} [{ci[0]:+.3f}, {ci[1]:+.3f}]" if v else "–"
-
-        rows.append(
-            f"| {m['model']} | {m['train'].split('-')[1]} | {a['test_mae']:.2f} ({a['test_mae_median_baseline']:.2f}) "
-            f"| {a['test_r']:.2f} | {bidmc.get('mae', float('nan')):.2f} / {bidmc.get('r', float('nan')):.2f} "
-            f"| {galaxy.get('mean_pred', float('nan')):.1f} | {cell('sex_male', 'auc')} "
-            f"| {cell('preop_htn', 'auc')} | {cell('preop_dm', 'auc')} | {cell('asa_ge3', 'auc')} "
-            f"| {cell('preop_htn', 'gap')} / {cell('preop_dm', 'gap')} / {cell('asa_ge3', 'gap')} |")
-    head = ("| model | rate | test age MAE (median baseline) | test r | BIDMC MAE / r | GalaxyPPG mean predicted age "
-            "| sex AUC / Δ over age | HTN AUC / Δ over age+sex [95% CI] | DM | ASA≥3 | age-gap AUC HTN / DM / ASA |\n"
-            "|---|---|---|---|---|---|---|---|---|---|---|")
-    return head + "\n" + "\n".join(rows) + "\n"
+        gal = next((v for k, v in ext.items() if k.startswith("galaxyppg")), {})
+        lines.append(f"| {m['model']} | {m['train'].split('-')[1]} | {a['test_mae']:.2f} ({a['test_mae_median_baseline']:.2f}) "
+                     f"| {a['test_r']:.2f} | {bidmc.get('mae', float('nan')):.2f} / {bidmc.get('r', float('nan')):.2f} "
+                     f"| {gal.get('mean_pred', float('nan')):.1f} |")
+    flags = [t for t in BINARY if t != "sex_male"]
+    lines += ["", "## Age gap: AUC of the bias-corrected gap on test people (age's own AUC in brackets)", "",
+              "| model | rate | " + " | ".join(flags) + " |", "|---|---|" + "---|" * len(flags)]
+    for m in runs:
+        g = m.get("age", {}).get("gap_auc", {})
+        if g:
+            lines.append(f"| {m['model']} | {m['train'].split('-')[1]} | " + " | ".join(
+                f"{g[t]['auc_gap']:.2f} ({g[t]['auc_age']:.2f})" if t in g else "–" for t in flags) + " |")
+    for kind, traits, head in (("Flags", BINARY, "PPG AUC / Δ AUC over age+sex [95% CI]"),
+                               ("Numbers", tuple(t for t in REGRESSION if t != "age"), "PPG r / Δ R² over age+sex [95% CI]")):
+        lines += ["", f"## {kind}: {head}; ** = interval above 0", "",
+                  "| model | rate | " + " | ".join(traits) + " |", "|---|---|" + "---|" * len(traits)]
+        for m in runs:
+            tr = m["traits"]
+            if not any(t in tr for t in traits):
+                continue
+            cells = []
+            for t in traits:
+                r = tr.get(t)
+                if not r:
+                    cells.append("–")
+                elif "auc_ppg" in r:
+                    cells.append(f"{r['auc_ppg']:.2f} / {_fmt_delta(r)}")
+                else:
+                    cells.append(f"{r['r_ppg']:.2f} / {_fmt_delta(r)}")
+            lines.append(f"| {m['model']} | {m['train'].split('-')[1]} | " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
