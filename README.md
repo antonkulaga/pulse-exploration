@@ -129,6 +129,10 @@ See [watch/phone/README.md](watch/phone/README.md).
   - Classical signal processing (NeuroKit2) is the baseline every model has to beat.
   - Better-suited open models: ECGFounder (single-lead ECG), Pulse-PPG (watch PPG), AnyPPG and
     ME-rPPG (camera).
+- [docs/galaxy-watch-ppg-foundation-models.md](docs/galaxy-watch-ppg-foundation-models.md) (2026-11-09):
+  what the watch gives, the open PPG foundation models' licences and fit to 25 Hz, and linear-probe
+  baselines of Pulse-PPG, PaPaGei-S and AnyPPG on kron-ppg's VitalDB split
+  ([`fm_baselines/`](fm_baselines), run on the GPU cluster).
 - [docs/cgm-track-plan.md](docs/cgm-track-plan.md): a plan, not yet built, for an N-of-1 study pairing
   overnight watch signals with a continuous glucose monitor to look for nocturnal lows.
 

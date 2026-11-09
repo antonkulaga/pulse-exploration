@@ -1,0 +1,38 @@
+[project]
+name = "pulse-fm-baselines"
+version = "0.1.0"
+description = "Open PPG foundation models (Pulse-PPG, PaPaGei-S, AnyPPG) as frozen encoders with linear probes, on kron-ppg's prepared windows and splits"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "polars>=1.30",
+    "scipy>=1.14",
+    "scikit-learn>=1.6",
+    "torch>=2.9.1",
+    # imported at module level by the upstream model files (Pulse-PPG, PaPaGei), never used by us
+    "matplotlib>=3.9",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+fm-baselines = "fm_baselines.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.20"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "fm_baselines"
+
+# The cluster's A100s; the same CUDA 12.8 wheels as kron-fm, so the uv cache is shared.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
