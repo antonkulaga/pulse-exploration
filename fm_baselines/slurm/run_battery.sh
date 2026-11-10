@@ -29,10 +29,21 @@ score_run() {
   if [ "${rate%.*}" != "25" ]; then
     log "skip $run: its encoder reads ${rate:-?} Hz and the E0 windows are 25 Hz"; echo "$run skipped rate=$rate" >> "$OUT/done.txt"; return
   fi
-  local variants
+  local variants clean_v="$V" vname
   variants=$(ls -d "$W"/*/ | sed 's:/$::' | tr '\n' ' ')
-  FM_RUN_IN="$KRON" gpu_job "battery-emb-$run" bash -c "python -m fm_baselines.kron_embed $ckpt $run $V --out $OUT/clean && \
+  # a run trained on its own variant (the brief names it, e.g. fs25-w30s-canon) gets its probes fitted on that
+  # variant's VitalDB windows; the E0 windows keep the standard preparation, which is what a canon front end
+  # has to be robust to
+  vname=$(grep -w -- "$run" "$BRIEF" | grep -oE "fs25-w30s[-a-z0-9]*" | head -1)
+  if [ -n "$vname" ] && [ "$vname" != "fs25-w30s" ] && [ -f "$KRON/data/interim/ppg/vitaldb/$vname/windows.parquet" ]; then
+    clean_v="$KRON/data/interim/ppg/vitaldb/$vname"
+    log "$run: probes fitted on VitalDB $vname"
+  fi
+  FM_RUN_IN="$KRON" gpu_job "battery-emb-$run" bash -c "python -m fm_baselines.kron_embed $ckpt $run $clean_v --out $OUT/clean && \
     python -m fm_baselines.kron_embed $ckpt $run $variants --per-subject 0 --out $OUT/emb" || { log "battery embeddings for $run failed"; return; }
+  if [ "$clean_v" != "$V" ]; then  # the scorer reads the probe's training set as vitaldb-fs25-w30s.*
+    for f in "$OUT/clean/$run/vitaldb-$vname".*; do mv "$f" "${f/vitaldb-$vname/vitaldb-fs25-w30s}"; done
+  fi
   FM_CPU_CPUS=4 FM_CPU_MEM=32G cpu_job "battery-score-$run" python -m fm_baselines.e0 score --clean "$OUT/clean" --emb "$OUT/emb" \
     --encoders "$run" --cases "$CASES" --out "$OUT/results" && echo "$run" >> "$OUT/done.txt"
   (cd "$HERE/.." && uv run --no-sync python -m fm_baselines.e0 summary "$OUT/results" > "$OUT/summary.md")
