@@ -1,7 +1,7 @@
 """The three open PPG encoders, loaded from their upstream checkouts at pinned commits.
 
 None of the upstream code is copied here: AnyPPG's repository has no licence, so it may be run but not
-redistributed. ``FM_HOME`` (default ``/data/uq2347/fm-baselines``) holds
+redistributed. ``FM_HOME`` (default ``~/fm-baselines``) holds
 
 * ``upstream/<repo>``: ``git clone`` of each repository, checked against :data:`COMMITS`;
 * ``weights/``: the downloaded checkpoints, checked against :data:`SHA256`.
@@ -21,7 +21,6 @@ import hashlib
 import importlib.util
 import io
 import os
-import subprocess
 import zipfile
 from dataclasses import dataclass
 from fractions import Fraction
@@ -44,7 +43,7 @@ SHA256 = {
 
 
 def fm_home() -> Path:
-    return Path(os.environ.get("FM_HOME", "/data/uq2347/fm-baselines"))
+    return Path(os.environ.get("FM_HOME", str(Path.home() / "fm-baselines")))
 
 
 def _sha256(data: bytes) -> str:
@@ -59,10 +58,24 @@ def _checked(path: Path) -> bytes:
     return data
 
 
+def _git_head(root: Path) -> str:
+    """The checked-out commit, read from ``.git`` directly (compute nodes have no git)."""
+    git = root / ".git"
+    head = (git / "HEAD").read_text().strip()
+    if not head.startswith("ref: "):
+        return head
+    ref = head.removeprefix("ref: ")
+    if (git / ref).is_file():
+        return (git / ref).read_text().strip()
+    for line in (git / "packed-refs").read_text().splitlines():
+        if line.endswith(" " + ref):
+            return line.split()[0]
+    raise RuntimeError(f"cannot resolve {ref} in {git}")
+
+
 def _upstream(repo: str) -> Path:
     root = fm_home() / "upstream" / repo
-    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
-                          check=True).stdout.strip()
+    head = _git_head(root)
     if head != COMMITS[repo]:
         raise RuntimeError(f"{root} is at {head}, expected {COMMITS[repo]}")
     return root

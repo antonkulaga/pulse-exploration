@@ -120,7 +120,7 @@ wrist.
 614 test people, 25 Hz. The test set has 183 people with hypertension, 63 with diabetes, 56 with ASA ≥ 3,
 34 with CKD, 172 with anemia, 37 with low albumin and 93 with abnormal lung function. The r1 clocks were
 fitted on run 1's 1,996 people, so they are scored on the 308 of their test people. Full table:
-`/data/uq2347/fm-baselines/runs/r0-partial/probe/summary.md`.
+`runs/r0-partial/probe/summary.md` under the cluster work folder (`FM_HOME`).
 
 **Age.**
 - The frozen KronLSTM with a linear probe reads age best: 6.92 y MAE (r 0.79), or 6.78 y after trait
@@ -232,14 +232,14 @@ fitted on run 1's 1,996 people, so they are scored on the 308 of their test peop
 
 **r0 (done, 2026-11-09):**
 - `slurm/run_partial.sh`;
-- GPU 6423398 (foundation models) and 6423401 (KronLSTM encoders), both on gpu13 for 4 min while run 2
-  was still downloading;
+- GPU 6423398 (foundation models) and 6423401 (KronLSTM encoders), both on kron-ppg's A100 node for 4 min
+  while run 2 was still downloading;
 - CPU 6423418, the serial probe: cancelled because it was too slow and replaced by parallel probes;
 - CPU 6423464, the probes and kron-ppg heads, 5 min.
 
-**r1 (run 2, scheduled).** Driver `fm_baselines/slurm/run_all.sh`, pid 1007851 on the haumea login node
-(started 22:28 UTC), log `/data/uq2347/fm-baselines/run-r1.log`. Each job ID is logged when submitted as
-`job <name> <id> on <node>`. Outputs go to `/data/uq2347/fm-baselines/runs/r1/{emb,probe}`, and the tables
+**r1 (run 2, scheduled).** Driver `fm_baselines/slurm/run_all.sh`, on the cluster's login node (started
+22:28 UTC), log `$FM_HOME/run-r1.log`. Each job ID is logged when submitted as
+`job <name> <id> on <node>`. Outputs go to `$FM_HOME/runs/r1/{emb,probe}`, and the tables
 to `probe/summary.md`.
 
 | step | waits for | jobs | expected (UTC, 2026-11-10) |
@@ -255,12 +255,12 @@ The KronLSTM itself, meaning run 2's pretraining, three age clocks and two trait
 kron-ppg's own drivers (`ppg-run2b.sh`, `ppg-traits-b.sh`). These jobs read their checkpoints and touch
 nothing of theirs.
 
-**GPU placement.** kron-ppg pins gpu13, and its jobs fail when both cards there are taken. So this driver
-uses only gpu11 and gpu12 until kron-ppg logs `traits finished`. A job that finds every card busy exits 3,
+**GPU placement.** kron-ppg pins one A100 node, and its jobs fail when both cards there are taken. So this
+driver keeps off that node until kron-ppg logs `traits finished` (see section 7 for the GPU pools). A job that finds every card busy exits 3,
 and the driver retries it on the next node every 10 min, for up to 12 h. If run 2 stops (fewer than 5,800
 tracks downloaded, or no encoder), the steps that depend on it log the failure and submit nothing.
 
-The times are estimates: run 2's pretraining is 40,000 steps (run 1's 20,000 took 28 min), and the `itmz`
+The times are estimates: run 2's pretraining is 40,000 steps (run 1's 20,000 took 28 min), and the group
 account's shared CPU cap can hold CPU jobs.
 
 ## 6. Caveats
@@ -274,3 +274,40 @@ account's shared CPU cap can hold CPU jobs.
   do slightly worse than a linear probe on the mean embedding.
 - As everywhere in this project: a PPG age is a within-person trend, and a clock earns its place by
   outcome evidence (the gap AUCs and the deltas), not by MAE.
+
+## 7. Overnight run, 2026-11-10: decisions taken without asking
+
+Anton asked for the cluster to stay busy overnight, with sensible defaults instead of questions. Each
+decision and its reason (cluster names stay in the git-ignored `slurm/env.local.sh`):
+
+1. **Two GPU pools.**
+   - The A100 nodes were full: other users' long jobs, plus kron-ppg run 2 and kron-dna.
+   - The older GPU nodes (11 GB cards) were idle and are reachable through a preemptible partition.
+   - So the foundation-model jobs run there; a requeued job just runs again.
+   - KronLSTM jobs stay on A100s, since its Triton kernels need bf16 hardware. They hold at most one A100
+     card at a time, through a lock shared by all fm_baselines drivers, and keep off kron-ppg's node until
+     its trait jobs finish.
+2. **Fine-tuning precision.** fp16 with gradient scaling on cards without bf16, and bf16 on A100s.
+3. **What runs tonight**, besides the run 2 comparison (section 5):
+   - **Format stress tests** (`stress.py`) on the r0 data, for Pulse-PPG, PaPaGei-S, AnyPPG and run 1's
+     KronLSTM.
+   - **Fine-tuning** of the three foundation models on VitalDB (`finetune.py`): one multi-task head on all 14
+     targets, 6,000 steps of 128 windows, encoder learning rate 1e-4 and head 1e-3, best step by
+     validation loss. This is the fair comparison with the KronLSTM, which saw VitalDB in pretraining.
+
+   The r0 data (3,986 people) is used, so the results sit next to the r0 table tonight. The same code can
+   run on run 2's 5,900 people next.
+4. **Stress tests are scored after the canonical preparation** (band-pass 0.5–8 Hz, robust scaling).
+   Perturbations the preparation removes cannot hurt, so the test measures what a watch would still show
+   the model.
+5. **Probes run in parallel processes**, one per embedding set, each with one BLAS thread. The serial probe
+   took about 12 min per set.
+6. **Restarts by hand.** The run 2 driver was restarted while it was only waiting: once for the shared lock
+   and once for the second GPU pool. One orphaned job was cancelled; the driver log records it.
+7. **Smoke tests first.** Before the overnight launch, both new scripts ran at tiny sizes on CPU and on an
+   11 GB card. Fine-tuning ran end to end, and the stress test's eight perturbations ran.
+
+**Results**, under `$FM_HOME/runs/`:
+- `r0-partial/probe/summary.md`: r0, now also with `*_finetune` rows;
+- `r0-partial/stress/summary.md`;
+- `r1/probe/summary.md`.

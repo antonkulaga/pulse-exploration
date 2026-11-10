@@ -111,3 +111,16 @@ def test_kron_head_scores_and_evaluate(tmp_path):
     m = evaluate(s, labels)
     assert m["age"]["test_mae"] < m["age"]["test_mae_median_baseline"]
     assert m["traits"]["preop_htn"]["delta"] > 0
+
+
+def test_perturbations_keep_shape_and_scale():
+    from fm_baselines.stress import PERTURBATIONS, canonical, perturb
+    fs = 25.0
+    t = np.arange(750) / fs
+    x = canonical(np.sin(2 * np.pi * 1.2 * t)[None, :].repeat(4, 0) + 0.05 * np.random.default_rng(0).normal(size=(4, 750)), fs)
+    for p in PERTURBATIONS:
+        y = perturb(x, fs, p)
+        assert y.shape == x.shape and np.isfinite(y).all(), p
+    assert np.allclose(perturb(x, fs, "clean"), x)
+    assert np.corrcoef(perturb(x, fs, "flip")[0], x[0])[0, 1] < -0.9
+    assert np.corrcoef(perturb(x, fs, "lowpass4")[0], x[0])[0, 1] > 0.9

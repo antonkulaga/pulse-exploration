@@ -3,12 +3,14 @@
 # run 1's KronLSTM encoder, the r2a trait heads and the r1 clocks; run 1's BIDMC and GalaxyPPG windows
 # converted to parquet as the external sets. Two GPU jobs (foundation models; KronLSTM encoders), then one
 # CPU job for the probes, kron-ppg's own heads and summary.md.
-#   NODE=gpu13 setsid nohup fm_baselines/slurm/run_partial.sh > <log> 2>&1 < /dev/null & disown
+#   NODE=<a free A100 node> setsid nohup fm_baselines/slurm/run_partial.sh > <log> 2>&1 < /dev/null & disown
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KRON="${KRON_FM:-/data/uq2347/sources/kron-fm}"
-OUT="${FM_OUT:-/data/uq2347/fm-baselines/runs/r0-partial}"
-EXT="${FM_EXT:-/data/uq2347/fm-baselines/smoke}"  # bidmc/ and galaxyppg/ fs25-w30s in the parquet format
+[ -f "$HERE/env.local.sh" ] && source "$HERE/env.local.sh"
+FM_HOME="${FM_HOME:-$HOME/fm-baselines}"
+KRON="${KRON_FM:-$HOME/sources/kron-fm}"
+OUT="${FM_OUT:-$FM_HOME/runs/r0-partial}"
+EXT="${FM_EXT:-$FM_HOME/smoke}"  # bidmc/ and galaxyppg/ fs25-w30s in the parquet format
 I="$KRON/data/interim/ppg"
 R="$KRON/data/output/runs/kron-ppg"
 CASES="$KRON/data/input/ppg/vitaldb/cases.csv.gz"

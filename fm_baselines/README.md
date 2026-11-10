@@ -32,7 +32,7 @@ cluster, while the root pins CPU torch for the laptop.
    PPG adds anything beyond age.
 5. Age clocks are judged by their bias-corrected gap's AUC for each condition.
 
-**Upstream code and weights.** No upstream code is copied here. `FM_HOME` (default `/data/uq2347/fm-baselines`)
+**Upstream code and weights.** No upstream code is copied here. `FM_HOME` (default `~/fm-baselines`)
 holds the `upstream/<repo>` clones and `weights/`. `models.py`:
 - checks each clone's commit and each checkpoint's SHA-256;
 - imports only the network file;
@@ -52,5 +52,15 @@ On the cluster:
 - `slurm/run_all.sh` chains everything to kron-ppg run 2's drivers. Each GPU job is one model and rate;
   CPU jobs do the probes and the summary.
 - `slurm/run_partial.sh` is the preliminary run on the windows that existed before run 2.
-- Cluster names go in the git-ignored `slurm/env.local.sh`: `FM_GPU_PARTITION`, `FM_CPU_PARTITION`,
-  `FM_ACCOUNT`, `FM_GPU_CONSTRAINT`, `FM_CPU_EXCLUDE`, `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`.
+- `slurm/run_overnight.sh` runs the format stress tests and fine-tunes the foundation models on VitalDB.
+- All drivers share `slurm/lib.sh`, which uses two GPU pools:
+  - KronLSTM jobs need A100s; they hold one card at a time through a lock.
+  - The foundation models run on a second pool.
+- Everything that names the cluster goes in the git-ignored `slurm/env.local.sh`:
+  - partitions and accounts: `FM_GPU_PARTITION`, `FM_CPU_PARTITION`, `FM_ACCOUNT`, `FM_GPU_CONSTRAINT`,
+    `FM_CPU_EXCLUDE`;
+  - the second pool: `FM_SMALL_GPU_NODES_ALL`, `FM_SMALL_GPU_PARTITION`, `FM_SMALL_GPU_ACCOUNT`;
+  - node lists: `FM_A100_NODES`, `FM_KRON_GPU_NODE`, `FM_SMALL_GPU_NODES`;
+  - paths: `FM_HOME`, `KRON_FM`, `KRON_LOGS`, `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`.
+
+  Keep it that way: this repository is public.
