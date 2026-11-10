@@ -124,3 +124,24 @@ def test_perturbations_keep_shape_and_scale():
     assert np.allclose(perturb(x, fs, "clean"), x)
     assert np.corrcoef(perturb(x, fs, "flip")[0], x[0])[0, 1] < -0.9
     assert np.corrcoef(perturb(x, fs, "lowpass4")[0], x[0])[0, 1] > 0.9
+
+
+def test_e0_perturbations_and_polarity():
+    from fm_baselines.e0 import FS, LEAD_S, PERTURBATIONS, SECONDS, TAIL_S, _icc, finish, perturb_raw, polarity_up
+    rng = np.random.default_rng(0)
+    n = int((LEAD_S + SECONDS + TAIL_S) * FS)
+    t = np.arange(n) / FS
+    # a pulse with a fast upstroke and slow decay (sawtooth-like), 72 bpm, plus slow drift
+    phase = (t * 1.2) % 1.0
+    beat = np.where(phase < 0.15, phase / 0.15, np.exp(-(phase - 0.15) * 4))
+    raw = beat + 0.3 * np.sin(2 * np.pi * 0.05 * t)
+    ref = finish(raw, causal=False)
+    assert ref.shape == (int(SECONDS * FS),)
+    for p in PERTURBATIONS:
+        y = finish(perturb_raw(raw, p, np.random.default_rng(1), float(np.var(ref))), causal=(p == "causal"))
+        assert y.shape == ref.shape and np.isfinite(y).all(), p
+    assert polarity_up(ref) is True
+    assert polarity_up(-ref) is False
+    a = rng.normal(size=50)
+    assert _icc(a, a) == pytest.approx(1.0)
+    assert _icc(a, rng.normal(size=50)) < 0.5
